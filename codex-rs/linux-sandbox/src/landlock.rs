@@ -1,7 +1,9 @@
-//! In-process Linux sandbox primitives: `no_new_privs` and seccomp.
+//! In-process sandbox primitives: `no_new_privs`, seccomp and Landlock.
 //!
-//! Filesystem restrictions are enforced by bubblewrap in `linux_run_main`.
-//! Landlock helpers remain available here as legacy/backup utilities.
+//! On the Linux bubblewrap path, filesystem restrictions are enforced by bwrap
+//! in `linux_run_main` and the Landlock helpers here are only the legacy
+//! fallback. On Android (Termux) there is no bwrap: the seccomp filter is the
+//! always-enforced backstop and Landlock is applied best effort on top.
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -35,10 +37,18 @@ use seccompiler::apply_filter;
 /// them, not the entire CLI process.
 ///
 /// This function is responsible for:
-/// - enabling `PR_SET_NO_NEW_PRIVS` when restrictions apply, and
-/// - installing the network seccomp filter when network access is disabled.
+/// - enabling `PR_SET_NO_NEW_PRIVS` when restrictions apply,
+/// - installing the seccomp filter (network deny-list plus the syscall
+///   hardening deny-list) when any restriction applies, and
+/// - installing the Landlock filesystem rules on the legacy path.
 ///
-/// Filesystem restrictions are intentionally handled by bubblewrap.
+/// On Linux with bubblewrap, filesystem restrictions are handled by bwrap and
+/// `apply_landlock_fs` is `false`. On Android (Termux) there is no bwrap: the
+/// seccomp filter is the *reliability floor* — it is always installed when a
+/// restriction applies and is enforced by every Android kernel
+/// (`CONFIG_SECCOMP_FILTER` is mandatory) — while the Landlock filesystem rules
+/// are applied best effort on top and are simply skipped (with a warning) on
+/// kernels built without `CONFIG_SECURITY_LANDLOCK`.
 pub(crate) fn apply_permission_profile_to_current_thread(
     permission_profile: &PermissionProfile,
     cwd: &Path,
@@ -54,21 +64,29 @@ pub(crate) fn apply_permission_profile_to_current_thread(
         proxy_routed_network,
     );
 
+    let filesystem_restricted =
+        apply_landlock_fs && !file_system_sandbox_policy.has_full_disk_write_access();
+
+    // On Android the seccomp filter is the guaranteed backstop: install it
+    // whenever *any* restriction is in effect, even if the network stays open,
+    // so the sandbox never degrades to "nothing enforced" when the kernel
+    // lacks Landlock. Elsewhere seccomp is only needed for the network policy.
+    let install_seccomp =
+        network_seccomp_mode.is_some() || (cfg!(target_os = "android") && filesystem_restricted);
+
     // `PR_SET_NO_NEW_PRIVS` is required for seccomp, but it also prevents
     // setuid privilege elevation. Many `bwrap` deployments rely on setuid, so
     // we avoid this unless we need seccomp or we are explicitly using the
     // legacy Landlock filesystem pipeline.
-    if network_seccomp_mode.is_some()
-        || (apply_landlock_fs && !file_system_sandbox_policy.has_full_disk_write_access())
-    {
+    if install_seccomp || filesystem_restricted {
         set_no_new_privs()?;
     }
 
-    if let Some(mode) = network_seccomp_mode {
-        install_network_seccomp_filter_on_current_thread(mode)?;
+    if install_seccomp {
+        install_seccomp_filter_on_current_thread(network_seccomp_mode)?;
     }
 
-    if apply_landlock_fs && !file_system_sandbox_policy.has_full_disk_write_access() {
+    if filesystem_restricted {
         if !file_system_sandbox_policy.has_full_disk_read_access() {
             return Err(CodexErr::UnsupportedOperation(
                 "Restricted read-only access is not supported by the legacy Linux Landlock filesystem backend."
@@ -81,7 +99,22 @@ pub(crate) fn apply_permission_profile_to_current_thread(
             .into_iter()
             .map(|writable_root| writable_root.root)
             .collect();
-        install_filesystem_landlock_rules_on_current_thread(writable_roots)?;
+        let enforced = install_filesystem_landlock_rules_on_current_thread(writable_roots)?;
+        if !enforced {
+            if cfg!(target_os = "android") {
+                // Landlock is compiled into the kernel only on some devices.
+                // The seccomp filter above is still enforced, so the command
+                // stays confined for network and the hardened syscalls; only
+                // the filesystem write boundary is not applied here.
+                eprintln!(
+                    "codex-linux-sandbox: Landlock is not available on this kernel; \
+                     filesystem writes are NOT confined. Network and syscall \
+                     restrictions remain enforced via seccomp."
+                );
+            } else {
+                return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
+            }
+        }
     }
 
     Ok(())
@@ -129,14 +162,14 @@ fn set_no_new_privs() -> Result<()> {
 /// access to the entire file-system while restricting write access to
 /// `/dev/null` and the provided list of `writable_roots`.
 ///
-/// # Errors
-/// Returns [`CodexErr::Sandbox`] variants when the ruleset fails to apply.
-///
-/// Note: this is currently unused because filesystem sandboxing is performed
-/// via bubblewrap. It is kept for reference and potential fallback use.
+/// Returns `Ok(true)` when the kernel enforced the ruleset and `Ok(false)`
+/// when Landlock is unavailable (kernel built without
+/// `CONFIG_SECURITY_LANDLOCK`); the caller decides whether an unenforced
+/// ruleset is fatal. `Err` is only returned when constructing the ruleset
+/// itself fails.
 fn install_filesystem_landlock_rules_on_current_thread(
     writable_roots: Vec<AbsolutePathBuf>,
-) -> Result<()> {
+) -> Result<bool> {
     let abi = ABI::V5;
     let access_rw = AccessFs::from_all(abi);
     let access_ro = AccessFs::from_read(abi);
@@ -155,19 +188,21 @@ fn install_filesystem_landlock_rules_on_current_thread(
 
     let status = ruleset.restrict_self()?;
 
-    if status.ruleset == landlock::RulesetStatus::NotEnforced {
-        return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
-    }
-
-    Ok(())
+    Ok(status.ruleset != landlock::RulesetStatus::NotEnforced)
 }
 
-/// Installs a seccomp filter for Linux network sandboxing.
+/// Installs the seccomp filter applied to sandboxed children.
+///
+/// The syscall hardening deny-list (`ptrace`, `process_vm_*`, `io_uring_*`) is
+/// always installed. When `mode` is `Some`, the network deny-list for that mode
+/// is layered on top; `None` installs the hardening deny-list only (used on
+/// Android when the filesystem policy is restricted but the network stays
+/// open, so seccomp is still the enforced backstop).
 ///
 /// The filter is applied to the current thread so only the sandboxed child
 /// inherits it.
-fn install_network_seccomp_filter_on_current_thread(
-    mode: NetworkSeccompMode,
+fn install_seccomp_filter_on_current_thread(
+    mode: Option<NetworkSeccompMode>,
 ) -> std::result::Result<(), SandboxErr> {
     fn deny_syscall(rules: &mut BTreeMap<i64, Vec<SeccompRule>>, nr: i64) {
         rules.insert(nr, vec![]); // empty rule vec = unconditional match
@@ -184,7 +219,8 @@ fn install_network_seccomp_filter_on_current_thread(
     deny_syscall(&mut rules, libc::SYS_io_uring_register);
 
     match mode {
-        NetworkSeccompMode::Restricted => {
+        None => {}
+        Some(NetworkSeccompMode::Restricted) => {
             deny_syscall(&mut rules, libc::SYS_connect);
             deny_syscall(&mut rules, libc::SYS_accept);
             deny_syscall(&mut rules, libc::SYS_accept4);
@@ -215,7 +251,7 @@ fn install_network_seccomp_filter_on_current_thread(
             rules.insert(libc::SYS_socket, vec![unix_only_rule.clone()]);
             rules.insert(libc::SYS_socketpair, vec![unix_only_rule]);
         }
-        NetworkSeccompMode::ProxyRouted => {
+        Some(NetworkSeccompMode::ProxyRouted) => {
             // In proxy-routed mode we allow IP sockets in the isolated
             // namespace (used to reach the local TCP bridge) but deny socket()
             // for all other families, including AF_UNIX. Only AF_UNIX

@@ -39,8 +39,11 @@ pub enum SandboxType {
     MacosSeatbelt,
     LinuxSeccomp,
     WindowsRestrictedToken,
-    /// Android/Termux: the `codex-linux-sandbox` helper applying Landlock
-    /// filesystem rules plus the network seccomp filter (no bubblewrap).
+    /// Android/Termux: the `codex-linux-sandbox` helper (no bubblewrap). The
+    /// seccomp filter (network deny-list plus syscall hardening) is always
+    /// enforced — `CONFIG_SECCOMP_FILTER` is mandatory on every Android
+    /// kernel — and Landlock filesystem rules are layered on best effort when
+    /// the kernel provides the LSM.
     AndroidLandlock,
 }
 
@@ -75,48 +78,16 @@ pub fn get_platform_sandbox(windows_sandbox_enabled: bool) -> Option<SandboxType
             None
         }
     } else if cfg!(target_os = "android") {
-        // Termux: Landlock is available only on kernels built with
-        // `CONFIG_SECURITY_LANDLOCK`. When it is missing there is no backend to
-        // fall back to, so callers treat the platform as sandbox-less.
-        android_landlock_available().then_some(SandboxType::AndroidLandlock)
+        // Termux: there is always a sandbox backend. The `codex-linux-sandbox`
+        // helper enforces the seccomp filter unconditionally
+        // (`CONFIG_SECCOMP_FILTER` is mandatory on every Android kernel) and
+        // adds Landlock filesystem rules best effort when the kernel was built
+        // with `CONFIG_SECURITY_LANDLOCK`. Unlike Windows there is nothing to
+        // gate on here, so the platform never degrades to "no sandbox".
+        Some(SandboxType::AndroidLandlock)
     } else {
         None
     }
-}
-
-/// Whether this Android kernel exposes the Landlock LSM.
-///
-/// Probes `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`,
-/// which returns the supported ABI version (`> 0`) when Landlock is enabled and
-/// `-ENOSYS`/`-EOPNOTSUPP` otherwise. The result is cached for the process.
-#[cfg(target_os = "android")]
-pub fn android_landlock_available() -> bool {
-    use std::sync::OnceLock;
-
-    // `LANDLOCK_CREATE_RULESET_VERSION` == 1. The `landlock` crate used by the
-    // helper binary relies on the same `libc::SYS_landlock_*` constants, so a
-    // target that lacks them could not enforce anything anyway.
-    const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
-
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-    *AVAILABLE.get_or_init(|| {
-        // SAFETY: passing a null attr pointer with the version flag only asks
-        // the kernel to report the supported ABI; it creates nothing.
-        let abi = unsafe {
-            libc::syscall(
-                libc::SYS_landlock_create_ruleset,
-                std::ptr::null::<libc::c_void>(),
-                0usize,
-                LANDLOCK_CREATE_RULESET_VERSION,
-            )
-        };
-        abi > 0
-    })
-}
-
-#[cfg(not(target_os = "android"))]
-pub fn android_landlock_available() -> bool {
-    false
 }
 
 pub fn with_managed_mitm_ca_readable_root(

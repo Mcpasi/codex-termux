@@ -304,29 +304,12 @@ fn by_construction_flag_alone_does_not_bypass_without_approval() {
 }
 
 #[test]
-fn android_without_landlock_is_unavailable_by_construction() {
-    assert!(sandbox_unavailable_by_construction_from(
-        /*target_is_android*/ true,
-        /*platform_sandbox*/ None,
-    ));
-}
-
-#[test]
-fn android_with_landlock_is_a_real_platform() {
-    // When the device kernel provides Landlock the Android build behaves like
-    // any other platform and stays fail-closed.
-    assert!(!sandbox_unavailable_by_construction_from(
-        /*target_is_android*/ true,
-        Some(SandboxType::AndroidLandlock),
-    ));
-}
-
-#[test]
-fn non_android_is_never_unavailable_by_construction() {
-    assert!(!sandbox_unavailable_by_construction_from(
-        /*target_is_android*/ false,
-        /*platform_sandbox*/ None,
-    ));
+fn sandbox_is_always_available_by_construction() {
+    // Every supported target compiles in a backend now (Android's seccomp
+    // filter is a hard backstop), so the production predicate is always false
+    // and an approved command is never nudged onto the unsandboxed path for
+    // this reason.
+    assert!(!sandbox_unavailable_by_construction());
 }
 
 #[test]

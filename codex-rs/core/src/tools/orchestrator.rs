@@ -231,12 +231,13 @@ impl ToolOrchestrator {
         }
 
         // 2) First attempt under the selected sandbox.
-        // On a platform with no sandbox backend at all (Android/Termux) an
-        // approved `apply_patch`/exec command must take the unsandboxed path
-        // (fork fix #22) instead of being refused by the executor; the deny-read
-        // guard inside `sandbox_override_for_first_attempt` still refuses the
-        // bypass when the policy forbids unsandboxed execution. Elsewhere the
-        // upstream owner-network policy decides.
+        // `sandbox_unavailable_by_construction()` is always `false` now that
+        // every target compiles in a backend (Android keeps an always-on
+        // seccomp filter even when the kernel lacks Landlock), so an approved
+        // `apply_patch`/exec command stays on the sandboxed path everywhere
+        // and the upstream owner-network policy decides. The argument is still
+        // threaded through `sandbox_override_for_first_attempt` so the bypass
+        // contract stays covered by tests.
         let unsandboxed_allowed = (!owner_network_policy
             && unsandboxed_execution_allowed(&file_system_sandbox_policy))
             || sandbox_unavailable_by_construction();
