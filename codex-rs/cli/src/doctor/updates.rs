@@ -494,11 +494,24 @@ fn is_newer(latest: &str, current: &str) -> Option<bool> {
     }
 }
 
+/// Prerelease suffixes this distribution publishes on its own version line.
+///
+/// Kept in step with the TUI update check: a fork repackaging of an upstream
+/// patch level compares equal to that patch level, while any other prerelease
+/// stays unparsable so doctor reports "unknown" instead of guessing.
+const FORK_PRERELEASE_SUFFIXES: &[&str] = &["termux", "agentcodi"];
+
 fn parse_version(value: &str) -> Option<(u64, u64, u64)> {
     let mut parts = value.trim().split('.');
     let major = parts.next()?.parse::<u64>().ok()?;
     let minor = parts.next()?.parse::<u64>().ok()?;
-    let patch = parts.next()?.parse::<u64>().ok()?;
+    let mut patch_parts = parts.next()?.splitn(2, '-');
+    let patch = patch_parts.next()?.parse::<u64>().ok()?;
+    if let Some(suffix) = patch_parts.next()
+        && !FORK_PRERELEASE_SUFFIXES.contains(&suffix)
+    {
+        return None;
+    }
     Some((major, minor, patch))
 }
 
@@ -631,6 +644,13 @@ mod tests {
         assert_eq!(is_newer("1.2.4", "1.2.3"), Some(true));
         assert_eq!(is_newer("1.2.3", "1.2.4"), Some(false));
         assert_eq!(is_newer("1.2.3-beta.1", "1.2.2"), None);
+    }
+
+    #[test]
+    fn fork_prerelease_suffix_compares_as_its_patch_level() {
+        assert_eq!(is_newer("0.153.3", "0.153.3-agentcodi.1"), Some(false));
+        assert_eq!(is_newer("0.153.4", "0.153.3-agentcodi.1"), Some(true));
+        assert_eq!(is_newer("1.2.3", "1.2.3-termux"), Some(false));
     }
 
     #[test]

@@ -1,3 +1,14 @@
+# [0.153.3-agentcodi.1] - 2026-09-06
+
+## Codex Termux 0.153.3-agentcodi.1 — agentcodi build line
+
+- Republishes the `0.153.3` tree on the `agentcodi` build line: the npm package
+  and the Cargo workspace both report `0.153.3-agentcodi.1`. No functional
+  change over `0.153.3`.
+- The update check in the TUI and in `codex doctor` treats an `agentcodi`
+  prerelease as its own patch level, so builds on this line are not reported as
+  out of date against the published `0.153.3`.
+
 # [0.153.3] - 2026-09-05
 
 ## Codex Termux 0.153.3 — guardrails for model-owned prompts

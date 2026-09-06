@@ -18,6 +18,14 @@ pub(crate) fn is_source_build_version(version: &str) -> bool {
     parse_version(version) == Some((0, 0, 0))
 }
 
+/// Prerelease suffixes this distribution publishes on its own version line.
+///
+/// They mark a repackaging of the same upstream patch level, so they must
+/// compare equal to the plain `MAJOR.MINOR.PATCH` release instead of being
+/// rejected like an unknown prerelease. `CARGO_PKG_VERSION` carries one of
+/// them, so rejecting it here would silently disable the update check.
+const FORK_PRERELEASE_SUFFIXES: &[&str] = &["termux", "agentcodi"];
+
 fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     let mut iter = v.trim().split('.');
     let maj = iter.next()?.parse::<u64>().ok()?;
@@ -26,7 +34,7 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
     let mut pat_parts = pat_str.splitn(2, '-');
     let pat = pat_parts.next()?.parse::<u64>().ok()?;
     if let Some(suffix) = pat_parts.next()
-        && suffix != "termux"
+        && !FORK_PRERELEASE_SUFFIXES.contains(&suffix)
     {
         return None;
     }
@@ -88,5 +96,14 @@ mod tests {
     #[test]
     fn termux_suffix_is_ignored() {
         assert_eq!(parse_version("1.2.3-termux"), Some((1, 2, 3)));
+    }
+
+    #[test]
+    fn fork_prerelease_suffix_compares_as_its_patch_level() {
+        assert_eq!(parse_version("0.153.3-agentcodi.1"), Some((0, 153, 3)));
+        // The published patch level is not an update over the fork build of
+        // that same patch level, but the next one is.
+        assert_eq!(is_newer("0.153.3", "0.153.3-agentcodi.1"), Some(false));
+        assert_eq!(is_newer("0.153.4", "0.153.3-agentcodi.1"), Some(true));
     }
 }
