@@ -68,7 +68,7 @@ impl From<SandboxTransformError> for CodexErr {
             SandboxTransformError::MissingLinuxSandboxExecutable => {
                 CodexErr::LandlockSandboxExecutableNotProvided
             }
-            error @ SandboxTransformError::AndroidLandlockUnsupported(_) => {
+            error @ SandboxTransformError::AndroidSandboxUnsupported(_) => {
                 CodexErr::UnsupportedOperation(error.to_string())
             }
             SandboxTransformError::EnvironmentNetworkProxy(message) => {

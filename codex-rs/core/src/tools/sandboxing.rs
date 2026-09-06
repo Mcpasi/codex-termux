@@ -239,11 +239,11 @@ pub(crate) enum SandboxOverride {
 ///
 /// Every supported target now compiles in a sandbox backend: macOS seatbelt,
 /// Linux seccomp + Landlock/bubblewrap, Windows restricted token, and Android
-/// the `codex-linux-sandbox` helper (always-on seccomp filter, best-effort
-/// Landlock). Android used to be the exception — it fell through to the
-/// unsandboxed path when the device kernel lacked Landlock — but the seccomp
-/// filter is a hard backstop (`CONFIG_SECCOMP_FILTER` is mandatory on every
-/// Android kernel), so there is no longer any platform without a backend.
+/// the `codex-linux-sandbox` helper's seccomp + ptrace supervisor. Android used
+/// to be the exception — it fell through to the unsandboxed path when the
+/// device kernel lacked Landlock — but the supervisor depends only on features
+/// every Android kernel is required to have, so there is no longer any platform
+/// without a backend.
 ///
 /// A sandbox that is missing or broken at runtime is a misconfiguration the
 /// executor must refuse (fail-closed), which is a separate concern from this

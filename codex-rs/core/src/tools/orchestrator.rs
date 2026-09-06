@@ -232,8 +232,8 @@ impl ToolOrchestrator {
 
         // 2) First attempt under the selected sandbox.
         // `sandbox_unavailable_by_construction()` is always `false` now that
-        // every target compiles in a backend (Android keeps an always-on
-        // seccomp filter even when the kernel lacks Landlock), so an approved
+        // every target compiles in a backend (Android supervises the command
+        // with seccomp + ptrace, which needs no Landlock), so an approved
         // `apply_patch`/exec command stays on the sandboxed path everywhere
         // and the upstream owner-network policy decides. The argument is still
         // threaded through `sandbox_override_for_first_attempt` so the bypass

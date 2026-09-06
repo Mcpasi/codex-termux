@@ -61,6 +61,7 @@ What this fork does not do:
 - `exec`/code-mode now runs for real on Android via the in-process V8 runtime (no longer a stub) - the meaningful capability gain on Termux
 - realtime voice/audio is no longer part of this build: upstream removed the TUI realtime voice feature (openai/codex#27801), so the fork's Android cpal/oboe enablement toggle (never usable from the Termux CLI anyway, as the backend needs an Android JavaVM/Activity) was dropped with it. Termux-native audio remains tracked on the Codex VL roadmap.
 - Android PTY and lock-handling compatibility patches remain enabled where upstream behavior still breaks on Bionic/Termux
+- the sandbox on Android is enforced with seccomp + ptrace instead of Landlock, so the filesystem boundary holds on devices whose kernel lacks the Landlock LSM (most of them) - see [docs/android_sandbox.md](./docs/android_sandbox.md)
 - anyone using a custom provider with an empty instruction value still receives the bundled instruction template: the symptom is that the provider works but behaves worse, not that it fails to start, because this fork checks instruction content while upstream checks only field presence
 
 ## Releases and Updates

@@ -488,7 +488,7 @@ fn transform_linux_seccomp_uses_helper_alias_when_launcher_is_not_helper_path() 
     assert_eq!(exec_request.arg0, Some("codex-linux-sandbox".to_string()));
 }
 
-fn transform_android_landlock_request(
+fn transform_android_ptrace_request(
     codex_linux_sandbox_exe: Option<&std::path::Path>,
     permissions: &PermissionProfile,
     enforce_managed_network: bool,
@@ -506,7 +506,7 @@ fn transform_android_landlock_request(
             additional_permissions: None,
         },
         permissions,
-        sandbox: SandboxType::AndroidLandlock,
+        sandbox: SandboxType::AndroidPtrace,
         enforce_managed_network,
         environment_id: None,
         network: None,
@@ -519,40 +519,43 @@ fn transform_android_landlock_request(
 }
 
 #[test]
-fn transform_android_landlock_wraps_command_with_legacy_landlock_helper() {
+fn transform_android_ptrace_wraps_command_with_helper() {
     let exe = std::path::PathBuf::from("/tmp/codex-linux-sandbox");
     let exec_request =
-        transform_android_landlock_request(Some(exe.as_path()), &PermissionProfile::workspace_write(), false)
+        transform_android_ptrace_request(Some(exe.as_path()), &PermissionProfile::workspace_write(), false)
             .expect("transform");
 
     assert_eq!(exec_request.command.first().map(String::as_str), Some("/tmp/codex-linux-sandbox"));
     assert!(exec_request.command.iter().any(|arg| arg == "--use-legacy-landlock"));
     assert!(exec_request.command.iter().any(|arg| arg == "--"));
     assert_eq!(exec_request.command.last().map(String::as_str), Some("true"));
-    assert_eq!(exec_request.sandbox, SandboxType::AndroidLandlock);
+    assert_eq!(exec_request.sandbox, SandboxType::AndroidPtrace);
     assert_eq!(exec_request.arg0, Some("/tmp/codex-linux-sandbox".to_string()));
 }
 
 #[test]
-fn transform_android_landlock_uses_helper_alias_when_launcher_is_not_helper_path() {
+fn transform_android_ptrace_uses_helper_alias_when_launcher_is_not_helper_path() {
     let exe = std::path::PathBuf::from("/tmp/codex");
     let exec_request =
-        transform_android_landlock_request(Some(exe.as_path()), &PermissionProfile::workspace_write(), false)
+        transform_android_ptrace_request(Some(exe.as_path()), &PermissionProfile::workspace_write(), false)
             .expect("transform");
 
     assert_eq!(exec_request.arg0, Some("codex-linux-sandbox".to_string()));
 }
 
 #[test]
-fn transform_android_landlock_requires_helper_executable() {
+fn transform_android_ptrace_requires_helper_executable() {
     assert!(matches!(
-        transform_android_landlock_request(None, &PermissionProfile::workspace_write(), false),
+        transform_android_ptrace_request(None, &PermissionProfile::workspace_write(), false),
         Err(super::SandboxTransformError::MissingLinuxSandboxExecutable)
     ));
 }
 
+/// Read-narrowing policies used to be rejected because Landlock could not
+/// express them. The supervisor evaluates the profile per syscall, so they are
+/// now carried through to the helper unchanged.
 #[test]
-fn transform_android_landlock_rejects_read_restricted_policy() {
+fn transform_android_ptrace_accepts_read_restricted_policy() {
     let cwd = AbsolutePathBuf::current_dir().expect("current dir");
     let permissions = PermissionProfile::from_runtime_permissions(
         &FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
@@ -564,23 +567,30 @@ fn transform_android_landlock_rejects_read_restricted_policy() {
     );
     let exe = std::path::PathBuf::from("/tmp/codex-linux-sandbox");
 
-    assert!(matches!(
-        transform_android_landlock_request(Some(exe.as_path()), &permissions, false),
-        Err(super::SandboxTransformError::AndroidLandlockUnsupported(_))
-    ));
+    let exec_request = transform_android_ptrace_request(Some(exe.as_path()), &permissions, false)
+        .expect("read-restricted policies are supported on Android");
+
+    assert_eq!(exec_request.sandbox, SandboxType::AndroidPtrace);
+    assert!(
+        !exec_request
+            .permission_profile
+            .file_system_sandbox_policy()
+            .has_full_disk_read_access(),
+        "the read restriction must survive the transform"
+    );
 }
 
 #[test]
-fn transform_android_landlock_rejects_managed_network() {
+fn transform_android_ptrace_rejects_managed_network() {
     let exe = std::path::PathBuf::from("/tmp/codex-linux-sandbox");
 
     assert!(matches!(
-        transform_android_landlock_request(
+        transform_android_ptrace_request(
             Some(exe.as_path()),
             &PermissionProfile::workspace_write(),
             /*enforce_managed_network*/ true,
         ),
-        Err(super::SandboxTransformError::AndroidLandlockUnsupported(_))
+        Err(super::SandboxTransformError::AndroidSandboxUnsupported(_))
     ));
 }
 

@@ -33,7 +33,7 @@ pub fn is_likely_sandbox_denied(
         const SIGSYS_CODE: i32 = libc::SIGSYS;
         if matches!(
             sandbox_type,
-            SandboxType::LinuxSeccomp | SandboxType::AndroidLandlock
+            SandboxType::LinuxSeccomp | SandboxType::AndroidPtrace
         ) && exec_output.exit_code == EXIT_CODE_SIGNAL_BASE + SIGSYS_CODE
         {
             return true;

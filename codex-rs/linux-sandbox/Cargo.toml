@@ -34,8 +34,8 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 url = { workspace = true }
 
-# Android (Termux) builds the Landlock + seccomp path only; the bubblewrap
-# modules and their dependencies are Linux-only.
+# Android builds the seccomp + ptrace supervisor only; the bubblewrap modules
+# and their dependencies are Linux-only.
 [target.'cfg(target_os = "android")'.dependencies]
 clap = { workspace = true, features = ["derive"] }
 codex-protocol = { workspace = true }
@@ -61,3 +61,4 @@ tokio = { workspace = true, features = [
 
 [target.'cfg(target_os = "android")'.dev-dependencies]
 pretty_assertions = { workspace = true }
+tempfile = { workspace = true }

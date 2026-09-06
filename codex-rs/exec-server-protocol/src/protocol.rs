@@ -328,7 +328,14 @@ pub enum ProcessSandboxType {
     MacosSeatbelt,
     LinuxSeccomp,
     WindowsRestrictedToken,
-    AndroidLandlock,
+    /// Android: the `codex-linux-sandbox` helper supervising the process with
+    /// `seccomp` + `ptrace`.
+    ///
+    /// The `androidLandlock` alias keeps responses from older exec-servers, which
+    /// named the backend after the Landlock layer it used to depend on,
+    /// deserializable.
+    #[serde(alias = "androidLandlock")]
+    AndroidPtrace,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1311,20 +1318,20 @@ mod tests {
     }
 
     #[test]
-    fn exec_response_round_trips_android_landlock_sandbox_type() {
+    fn exec_response_round_trips_android_ptrace_sandbox_type() {
         let response: ExecResponse = serde_json::from_value(serde_json::json!({
             "processId": "current",
-            "sandboxType": "androidLandlock",
+            "sandboxType": "androidPtrace",
         }))
-        .expect("android landlock response should deserialize");
+        .expect("android ptrace response should deserialize");
 
         assert_eq!(
             response.sandbox_type,
-            Some(ProcessSandboxType::AndroidLandlock)
+            Some(ProcessSandboxType::AndroidPtrace)
         );
         assert_eq!(
             serde_json::to_value(&response).expect("serialize")["sandboxType"],
-            serde_json::json!("androidLandlock"),
+            serde_json::json!("androidPtrace"),
         );
     }
 }

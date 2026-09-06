@@ -2,8 +2,9 @@
 //!
 //! On the Linux bubblewrap path, filesystem restrictions are enforced by bwrap
 //! in `linux_run_main` and the Landlock helpers here are only the legacy
-//! fallback. On Android (Termux) there is no bwrap: the seccomp filter is the
-//! always-enforced backstop and Landlock is applied best effort on top.
+//! fallback. Android does not use this module at all: it has no bwrap and no
+//! guaranteed Landlock, and enforces its policy in `crate::android_sandbox`
+//! instead.
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -43,12 +44,7 @@ use seccompiler::apply_filter;
 /// - installing the Landlock filesystem rules on the legacy path.
 ///
 /// On Linux with bubblewrap, filesystem restrictions are handled by bwrap and
-/// `apply_landlock_fs` is `false`. On Android (Termux) there is no bwrap: the
-/// seccomp filter is the *reliability floor* — it is always installed when a
-/// restriction applies and is enforced by every Android kernel
-/// (`CONFIG_SECCOMP_FILTER` is mandatory) — while the Landlock filesystem rules
-/// are applied best effort on top and are simply skipped (with a warning) on
-/// kernels built without `CONFIG_SECURITY_LANDLOCK`.
+/// `apply_landlock_fs` is `false`.
 pub(crate) fn apply_permission_profile_to_current_thread(
     permission_profile: &PermissionProfile,
     cwd: &Path,
@@ -67,12 +63,7 @@ pub(crate) fn apply_permission_profile_to_current_thread(
     let filesystem_restricted =
         apply_landlock_fs && !file_system_sandbox_policy.has_full_disk_write_access();
 
-    // On Android the seccomp filter is the guaranteed backstop: install it
-    // whenever *any* restriction is in effect, even if the network stays open,
-    // so the sandbox never degrades to "nothing enforced" when the kernel
-    // lacks Landlock. Elsewhere seccomp is only needed for the network policy.
-    let install_seccomp =
-        network_seccomp_mode.is_some() || (cfg!(target_os = "android") && filesystem_restricted);
+    let install_seccomp = network_seccomp_mode.is_some();
 
     // `PR_SET_NO_NEW_PRIVS` is required for seccomp, but it also prevents
     // setuid privilege elevation. Many `bwrap` deployments rely on setuid, so
@@ -101,19 +92,7 @@ pub(crate) fn apply_permission_profile_to_current_thread(
             .collect();
         let enforced = install_filesystem_landlock_rules_on_current_thread(writable_roots)?;
         if !enforced {
-            if cfg!(target_os = "android") {
-                // Landlock is compiled into the kernel only on some devices.
-                // The seccomp filter above is still enforced, so the command
-                // stays confined for network and the hardened syscalls; only
-                // the filesystem write boundary is not applied here.
-                eprintln!(
-                    "codex-linux-sandbox: Landlock is not available on this kernel; \
-                     filesystem writes are NOT confined. Network and syscall \
-                     restrictions remain enforced via seccomp."
-                );
-            } else {
-                return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
-            }
+            return Err(CodexErr::Sandbox(SandboxErr::LandlockRestrict));
         }
     }
 
@@ -164,9 +143,8 @@ fn set_no_new_privs() -> Result<()> {
 ///
 /// Returns `Ok(true)` when the kernel enforced the ruleset and `Ok(false)`
 /// when Landlock is unavailable (kernel built without
-/// `CONFIG_SECURITY_LANDLOCK`); the caller decides whether an unenforced
-/// ruleset is fatal. `Err` is only returned when constructing the ruleset
-/// itself fails.
+/// `CONFIG_SECURITY_LANDLOCK`). `Err` is only returned when constructing the
+/// ruleset itself fails.
 fn install_filesystem_landlock_rules_on_current_thread(
     writable_roots: Vec<AbsolutePathBuf>,
 ) -> Result<bool> {
@@ -195,9 +173,7 @@ fn install_filesystem_landlock_rules_on_current_thread(
 ///
 /// The syscall hardening deny-list (`ptrace`, `process_vm_*`, `io_uring_*`) is
 /// always installed. When `mode` is `Some`, the network deny-list for that mode
-/// is layered on top; `None` installs the hardening deny-list only (used on
-/// Android when the filesystem policy is restricted but the network stays
-/// open, so seccomp is still the enforced backstop).
+/// is layered on top.
 ///
 /// The filter is applied to the current thread so only the sandboxed child
 /// inherits it.

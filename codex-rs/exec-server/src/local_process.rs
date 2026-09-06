@@ -372,7 +372,7 @@ impl LocalProcess {
             SandboxType::MacosSeatbelt => Some(ProcessSandboxType::MacosSeatbelt),
             SandboxType::LinuxSeccomp => Some(ProcessSandboxType::LinuxSeccomp),
             SandboxType::WindowsRestrictedToken => Some(ProcessSandboxType::WindowsRestrictedToken),
-            SandboxType::AndroidLandlock => Some(ProcessSandboxType::AndroidLandlock),
+            SandboxType::AndroidPtrace => Some(ProcessSandboxType::AndroidPtrace),
         };
 
         let start = Arc::new(ProcessStart);

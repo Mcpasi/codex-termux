@@ -1,17 +1,14 @@
 //! Android (Termux) entry point for `codex-linux-sandbox`.
 //!
-//! There is no bubblewrap on Android: this applies the Landlock LSM filesystem
-//! rules (writable roots, full read) plus the network seccomp filter to the
-//! current process, then execs the requested command. It mirrors the legacy
-//! Landlock tail of [`crate::linux_run_main::run_main`].
+//! There is no bubblewrap on Android and no guaranteed Landlock LSM, so this
+//! helper does not try to hand the policy to the kernel. It runs the command as
+//! a traced child and enforces the permission profile itself; see
+//! [`crate::android_sandbox`] for the mechanism.
 
 use clap::Parser;
 use std::path::PathBuf;
 
 use codex_protocol::models::PermissionProfile;
-
-use crate::exec_util::exec_or_panic;
-use crate::landlock::apply_permission_profile_to_current_thread;
 
 /// CLI surface for the Android sandbox helper.
 ///
@@ -33,7 +30,8 @@ struct AndroidSandboxCommand {
     #[arg(long = "permission-profile", hide = true, value_parser = parse_permission_profile)]
     permission_profile: Option<PermissionProfile>,
 
-    /// Accepted and ignored: the Android backend is always legacy Landlock.
+    /// Accepted and ignored: the Android backend never uses the Landlock
+    /// pipeline as its enforcement mechanism.
     #[arg(long = "use-legacy-landlock", hide = true, default_value_t = false)]
     use_legacy_landlock: bool,
 
@@ -59,8 +57,8 @@ pub fn run_main() -> ! {
         allow_network_for_proxy,
         command,
     } = AndroidSandboxCommand::parse();
-    // The Android backend has no bubblewrap pipeline, so it is always the
-    // "legacy" Landlock path regardless of this flag.
+    // The Android backend has no bubblewrap pipeline, so the caller's choice
+    // between the bwrap and legacy Landlock shapes does not apply here.
     let _ = use_legacy_landlock;
 
     if allow_network_for_proxy {
@@ -73,17 +71,7 @@ pub fn run_main() -> ! {
     let permission_profile =
         permission_profile.unwrap_or_else(|| panic!("missing permission profile configuration"));
 
-    if let Err(err) = apply_permission_profile_to_current_thread(
-        &permission_profile,
-        &sandbox_policy_cwd,
-        /*apply_landlock_fs*/ true,
-        /*allow_network_for_proxy*/ false,
-        /*proxy_routed_network*/ false,
-    ) {
-        panic!("error applying Android sandbox restrictions: {err:?}");
-    }
-
-    exec_or_panic(command);
+    crate::android_sandbox::run(&permission_profile, &sandbox_policy_cwd, command)
 }
 
 #[cfg(test)]

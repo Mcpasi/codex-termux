@@ -35,7 +35,7 @@ pub(crate) fn sandbox_type_from_protocol(
         Some(ProcessSandboxType::WindowsRestrictedToken) => {
             Some(SandboxType::WindowsRestrictedToken)
         }
-        Some(ProcessSandboxType::AndroidLandlock) => Some(SandboxType::AndroidLandlock),
+        Some(ProcessSandboxType::AndroidPtrace) => Some(SandboxType::AndroidPtrace),
     }
 }
 

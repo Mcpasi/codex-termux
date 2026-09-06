@@ -39,12 +39,17 @@ pub enum SandboxType {
     MacosSeatbelt,
     LinuxSeccomp,
     WindowsRestrictedToken,
-    /// Android/Termux: the `codex-linux-sandbox` helper (no bubblewrap). The
-    /// seccomp filter (network deny-list plus syscall hardening) is always
-    /// enforced — `CONFIG_SECCOMP_FILTER` is mandatory on every Android
-    /// kernel — and Landlock filesystem rules are layered on best effort when
-    /// the kernel provides the LSM.
-    AndroidLandlock,
+    /// Android: the `codex-linux-sandbox` helper supervising the command with
+    /// `seccomp` + `ptrace`.
+    ///
+    /// Neither bubblewrap (no unprivileged user namespaces) nor Landlock (not
+    /// compiled into most device kernels) is available here, so the helper
+    /// enforces the permission profile itself: a `SECCOMP_RET_TRACE` filter
+    /// routes every path-carrying syscall to a supervisor process that resolves
+    /// the path and answers it from the policy. Both `seccomp` and `ptrace` are
+    /// mandatory kernel features on Android, so this backend does not depend on
+    /// anything a given device might lack.
+    AndroidPtrace,
 }
 
 impl SandboxType {
@@ -54,7 +59,7 @@ impl SandboxType {
             SandboxType::MacosSeatbelt => "seatbelt",
             SandboxType::LinuxSeccomp => "seccomp",
             SandboxType::WindowsRestrictedToken => "windows_sandbox",
-            SandboxType::AndroidLandlock => "android_landlock",
+            SandboxType::AndroidPtrace => "android_ptrace",
         }
     }
 }
@@ -78,13 +83,12 @@ pub fn get_platform_sandbox(windows_sandbox_enabled: bool) -> Option<SandboxType
             None
         }
     } else if cfg!(target_os = "android") {
-        // Termux: there is always a sandbox backend. The `codex-linux-sandbox`
-        // helper enforces the seccomp filter unconditionally
-        // (`CONFIG_SECCOMP_FILTER` is mandatory on every Android kernel) and
-        // adds Landlock filesystem rules best effort when the kernel was built
-        // with `CONFIG_SECURITY_LANDLOCK`. Unlike Windows there is nothing to
-        // gate on here, so the platform never degrades to "no sandbox".
-        Some(SandboxType::AndroidLandlock)
+        // Android always has a sandbox backend. The `codex-linux-sandbox`
+        // helper enforces the filesystem policy from a `ptrace` supervisor and
+        // hardens the process with `seccomp`; both are mandatory kernel
+        // features on the platform, so unlike Windows there is nothing to gate
+        // on here and the platform never degrades to "no sandbox".
+        Some(SandboxType::AndroidPtrace)
     } else {
         None
     }
@@ -225,10 +229,11 @@ pub enum SandboxTransformError {
         source: io::Error,
     },
     MissingLinuxSandboxExecutable,
-    /// The Android Landlock backend cannot represent this request (read-narrowing
-    /// / deny-read filesystem rules, or managed-network proxy routing, need a
-    /// mechanism this platform lacks).
-    AndroidLandlockUnsupported(String),
+    /// The Android backend cannot represent this request. Filesystem policies
+    /// are all supported — the supervisor enforces them directly — but
+    /// managed-network proxy routing needs an isolated network namespace the
+    /// platform cannot create.
+    AndroidSandboxUnsupported(String),
     EnvironmentNetworkProxy(String),
     #[cfg(target_os = "macos")]
     SeatbeltPreparation(String),
@@ -256,8 +261,8 @@ impl std::fmt::Display for SandboxTransformError {
             Self::MissingLinuxSandboxExecutable => {
                 write!(f, "missing codex-linux-sandbox executable path")
             }
-            Self::AndroidLandlockUnsupported(reason) => {
-                write!(f, "the Android Landlock sandbox cannot enforce this request: {reason}")
+            Self::AndroidSandboxUnsupported(reason) => {
+                write!(f, "the Android sandbox cannot enforce this request: {reason}")
             }
             Self::EnvironmentNetworkProxy(err) => {
                 write!(f, "failed to prepare environment network proxy: {err}")
@@ -284,7 +289,7 @@ impl std::error::Error for SandboxTransformError {
             Self::InvalidCommandCwd { source, .. }
             | Self::InvalidSandboxPolicyCwd { source, .. } => Some(source),
             Self::MissingLinuxSandboxExecutable => None,
-            Self::AndroidLandlockUnsupported(_) => None,
+            Self::AndroidSandboxUnsupported(_) => None,
             Self::EnvironmentNetworkProxy(_) => None,
             #[cfg(target_os = "macos")]
             Self::SeatbeltPreparation(_) => None,
@@ -465,26 +470,20 @@ impl SandboxManager {
                     Some(pending),
                 )
             }
-            SandboxType::AndroidLandlock => {
+            SandboxType::AndroidPtrace => {
                 let pending = pending_sandboxed_request?;
                 let exe = codex_linux_sandbox_exe
                     .ok_or(SandboxTransformError::MissingLinuxSandboxExecutable)?;
-                // The legacy Landlock backend enforces writable roots but keeps
-                // full read access; it cannot represent read-narrowing or
-                // deny-read policies.
-                if !pending
-                    .effective_permission_profile
-                    .file_system_sandbox_policy()
-                    .has_full_disk_read_access()
-                {
-                    return Err(SandboxTransformError::AndroidLandlockUnsupported(
-                        "read-restricted or deny-read filesystem policies".to_string(),
-                    ));
-                }
-                // Managed-network proxy routing relies on an isolated network
-                // namespace, which Termux cannot create.
+                // Read-narrowing and deny-read entries need no special handling
+                // here: the helper's supervisor evaluates the whole permission
+                // profile per syscall rather than projecting it onto a kernel
+                // ruleset, so it enforces exactly what was configured.
+                //
+                // Managed-network proxy routing is the one thing it cannot do,
+                // because that relies on an isolated network namespace Android
+                // cannot create.
                 if enforce_managed_network {
-                    return Err(SandboxTransformError::AndroidLandlockUnsupported(
+                    return Err(SandboxTransformError::AndroidSandboxUnsupported(
                         "managed-network proxy routing".to_string(),
                     ));
                 }
