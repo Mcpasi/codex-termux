@@ -296,7 +296,7 @@ where
 {
     let paths = Arg0DispatchPaths {
         codex_self_exe: current_exe.clone(),
-        codex_linux_sandbox_exe: if cfg!(target_os = "linux") {
+        codex_linux_sandbox_exe: if cfg!(any(target_os = "linux", target_os = "android")) {
             linux_sandbox_exe_path(path_entry_guard.as_ref(), current_exe)
         } else {
             None
@@ -447,7 +447,7 @@ fn prepare_path_entry_for_codex_aliases(
     for filename in &[
         APPLY_PATCH_ARG0,
         MISSPELLED_APPLY_PATCH_ARG0,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         CODEX_LINUX_SANDBOX_ARG0,
         #[cfg(unix)]
         EXECVE_WRAPPER_ARG0,
@@ -485,11 +485,11 @@ fn prepare_path_entry_for_codex_aliases(
     let paths = Arg0DispatchPaths {
         codex_self_exe: resolve_codex_self_exe(),
         codex_linux_sandbox_exe: {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             {
                 Some(path.join(CODEX_LINUX_SANDBOX_ARG0))
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
             {
                 None
             }

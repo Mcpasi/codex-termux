@@ -1,5 +1,7 @@
 use std::ffi::CString;
+#[cfg(target_os = "linux")]
 use std::fs::File;
+#[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
 
 pub(crate) fn argv_to_cstrings(argv: &[String]) -> Vec<CString> {
@@ -13,12 +15,36 @@ pub(crate) fn argv_to_cstrings(argv: &[String]) -> Vec<CString> {
     cstrings
 }
 
+/// Exec the provided argv, panicking with context if it fails.
+pub(crate) fn exec_or_panic(command: Vec<String>) -> ! {
+    if command.is_empty() {
+        panic!("no command specified to execute");
+    }
+    let program = command[0].clone();
+    let c_args = argv_to_cstrings(&command);
+
+    let mut c_args_ptrs: Vec<*const libc::c_char> = c_args.iter().map(|arg| arg.as_ptr()).collect();
+    c_args_ptrs.push(std::ptr::null());
+
+    // SAFETY: `c_args` (which owns argv[0], the program path) and the pointer
+    // array stay alive until `execvp` returns.
+    unsafe {
+        libc::execvp(c_args[0].as_ptr(), c_args_ptrs.as_ptr());
+    }
+
+    // If execvp returns, there was an error.
+    let err = std::io::Error::last_os_error();
+    panic!("Failed to execvp {program}: {err}");
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn make_files_inheritable(files: &[File]) {
     for file in files {
         clear_cloexec(file.as_raw_fd());
     }
 }
 
+#[cfg(target_os = "linux")]
 fn clear_cloexec(fd: libc::c_int) {
     // SAFETY: `fd` is an owned descriptor kept alive by `files`.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
@@ -39,7 +65,7 @@ fn clear_cloexec(fd: libc::c_int) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;

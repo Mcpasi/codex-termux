@@ -39,6 +39,9 @@ pub enum SandboxType {
     MacosSeatbelt,
     LinuxSeccomp,
     WindowsRestrictedToken,
+    /// Android/Termux: the `codex-linux-sandbox` helper applying Landlock
+    /// filesystem rules plus the network seccomp filter (no bubblewrap).
+    AndroidLandlock,
 }
 
 impl SandboxType {
@@ -48,6 +51,7 @@ impl SandboxType {
             SandboxType::MacosSeatbelt => "seatbelt",
             SandboxType::LinuxSeccomp => "seccomp",
             SandboxType::WindowsRestrictedToken => "windows_sandbox",
+            SandboxType::AndroidLandlock => "android_landlock",
         }
     }
 }
@@ -70,9 +74,49 @@ pub fn get_platform_sandbox(windows_sandbox_enabled: bool) -> Option<SandboxType
         } else {
             None
         }
+    } else if cfg!(target_os = "android") {
+        // Termux: Landlock is available only on kernels built with
+        // `CONFIG_SECURITY_LANDLOCK`. When it is missing there is no backend to
+        // fall back to, so callers treat the platform as sandbox-less.
+        android_landlock_available().then_some(SandboxType::AndroidLandlock)
     } else {
         None
     }
+}
+
+/// Whether this Android kernel exposes the Landlock LSM.
+///
+/// Probes `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)`,
+/// which returns the supported ABI version (`> 0`) when Landlock is enabled and
+/// `-ENOSYS`/`-EOPNOTSUPP` otherwise. The result is cached for the process.
+#[cfg(target_os = "android")]
+pub fn android_landlock_available() -> bool {
+    use std::sync::OnceLock;
+
+    // `LANDLOCK_CREATE_RULESET_VERSION` == 1. The `landlock` crate used by the
+    // helper binary relies on the same `libc::SYS_landlock_*` constants, so a
+    // target that lacks them could not enforce anything anyway.
+    const LANDLOCK_CREATE_RULESET_VERSION: libc::c_uint = 1;
+
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        // SAFETY: passing a null attr pointer with the version flag only asks
+        // the kernel to report the supported ABI; it creates nothing.
+        let abi = unsafe {
+            libc::syscall(
+                libc::SYS_landlock_create_ruleset,
+                std::ptr::null::<libc::c_void>(),
+                0usize,
+                LANDLOCK_CREATE_RULESET_VERSION,
+            )
+        };
+        abi > 0
+    })
+}
+
+#[cfg(not(target_os = "android"))]
+pub fn android_landlock_available() -> bool {
+    false
 }
 
 pub fn with_managed_mitm_ca_readable_root(
@@ -210,6 +254,10 @@ pub enum SandboxTransformError {
         source: io::Error,
     },
     MissingLinuxSandboxExecutable,
+    /// The Android Landlock backend cannot represent this request (read-narrowing
+    /// / deny-read filesystem rules, or managed-network proxy routing, need a
+    /// mechanism this platform lacks).
+    AndroidLandlockUnsupported(String),
     EnvironmentNetworkProxy(String),
     #[cfg(target_os = "macos")]
     SeatbeltPreparation(String),
@@ -237,6 +285,9 @@ impl std::fmt::Display for SandboxTransformError {
             Self::MissingLinuxSandboxExecutable => {
                 write!(f, "missing codex-linux-sandbox executable path")
             }
+            Self::AndroidLandlockUnsupported(reason) => {
+                write!(f, "the Android Landlock sandbox cannot enforce this request: {reason}")
+            }
             Self::EnvironmentNetworkProxy(err) => {
                 write!(f, "failed to prepare environment network proxy: {err}")
             }
@@ -262,6 +313,7 @@ impl std::error::Error for SandboxTransformError {
             Self::InvalidCommandCwd { source, .. }
             | Self::InvalidSandboxPolicyCwd { source, .. } => Some(source),
             Self::MissingLinuxSandboxExecutable => None,
+            Self::AndroidLandlockUnsupported(_) => None,
             Self::EnvironmentNetworkProxy(_) => None,
             #[cfg(target_os = "macos")]
             Self::SeatbeltPreparation(_) => None,
@@ -432,6 +484,46 @@ impl SandboxManager {
                     pending.native_sandbox_policy_cwd.as_path(),
                     use_legacy_landlock,
                     allow_proxy_network,
+                );
+                let mut full_command = Vec::with_capacity(1 + args.len());
+                full_command.push(os_string_to_command_component(exe.as_os_str().to_owned()));
+                full_command.append(&mut args);
+                (
+                    full_command,
+                    Some(linux_sandbox_arg0_override(exe)),
+                    Some(pending),
+                )
+            }
+            SandboxType::AndroidLandlock => {
+                let pending = pending_sandboxed_request?;
+                let exe = codex_linux_sandbox_exe
+                    .ok_or(SandboxTransformError::MissingLinuxSandboxExecutable)?;
+                // The legacy Landlock backend enforces writable roots but keeps
+                // full read access; it cannot represent read-narrowing or
+                // deny-read policies.
+                if !pending
+                    .effective_permission_profile
+                    .file_system_sandbox_policy()
+                    .has_full_disk_read_access()
+                {
+                    return Err(SandboxTransformError::AndroidLandlockUnsupported(
+                        "read-restricted or deny-read filesystem policies".to_string(),
+                    ));
+                }
+                // Managed-network proxy routing relies on an isolated network
+                // namespace, which Termux cannot create.
+                if enforce_managed_network {
+                    return Err(SandboxTransformError::AndroidLandlockUnsupported(
+                        "managed-network proxy routing".to_string(),
+                    ));
+                }
+                let mut args = create_linux_sandbox_command_args_for_permission_profile(
+                    os_argv_to_strings(argv),
+                    pending.native_command_cwd.as_path(),
+                    &pending.effective_permission_profile,
+                    pending.native_sandbox_policy_cwd.as_path(),
+                    /*use_legacy_landlock*/ true,
+                    /*allow_network_for_proxy*/ false,
                 );
                 let mut full_command = Vec::with_capacity(1 + args.len());
                 full_command.push(os_string_to_command_component(exe.as_os_str().to_owned()));

@@ -141,7 +141,9 @@ fn classify_filesystem_sandbox_violation(
     let backend = match sandbox_type {
         SandboxType::None => return None,
         SandboxType::MacosSeatbelt => SandboxViolationBackend::Seatbelt,
-        SandboxType::LinuxSeccomp => SandboxViolationBackend::LinuxSandbox,
+        SandboxType::LinuxSeccomp | SandboxType::AndroidLandlock => {
+            SandboxViolationBackend::LinuxSandbox
+        }
         SandboxType::WindowsRestrictedToken => SandboxViolationBackend::WindowsSandbox,
     };
 
@@ -160,8 +162,10 @@ fn classify_filesystem_sandbox_violation(
 
     #[cfg(unix)]
     {
-        if sandbox_type == SandboxType::LinuxSeccomp
-            && exec_output.exit_code == EXIT_CODE_SIGNAL_BASE + libc::SIGSYS
+        if matches!(
+            sandbox_type,
+            SandboxType::LinuxSeccomp | SandboxType::AndroidLandlock
+        ) && exec_output.exit_code == EXIT_CODE_SIGNAL_BASE + libc::SIGSYS
         {
             return Some(FileSystemSandboxViolation {
                 backend,

@@ -46,12 +46,12 @@ pub enum SandboxErr {
     },
 
     /// Error from linux seccomp filter setup
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[error("seccomp setup error")]
     SeccompInstall(#[from] seccompiler::Error),
 
     /// Error from linux seccomp backend
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[error("seccomp backend error")]
     SeccompBackend(#[from] seccompiler::BackendError),
 
@@ -177,10 +177,10 @@ pub enum CodexErrorDetails {
     Io(#[from] io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[error(transparent)]
     LandlockRuleset(#[from] landlock::RulesetError),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     #[error(transparent)]
     LandlockPathFd(#[from] landlock::PathFdError),
     #[error(transparent)]
@@ -259,14 +259,14 @@ impl From<JoinError> for CodexErr {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 impl From<landlock::RulesetError> for CodexErr {
     fn from(error: landlock::RulesetError) -> Self {
         CodexErrorDetails::from(error).into()
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 impl From<landlock::PathFdError> for CodexErr {
     fn from(error: landlock::PathFdError) -> Self {
         CodexErrorDetails::from(error).into()
@@ -342,9 +342,9 @@ impl CodexErr {
         Fatal(message: String),
         Io(error: io::Error),
         Json(error: serde_json::Error),
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         LandlockRuleset(error: landlock::RulesetError),
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "android"))]
         LandlockPathFd(error: landlock::PathFdError),
         TokioJoin(error: JoinError),
         EnvVar(error: EnvVarError),
@@ -406,7 +406,7 @@ impl CodexErr {
             | CodexErrorDetails::Io(_)
             | CodexErrorDetails::Json(_)
             | CodexErrorDetails::TokioJoin(_) => true,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "android"))]
             CodexErrorDetails::LandlockRuleset(_) | CodexErrorDetails::LandlockPathFd(_) => false,
         }
     }

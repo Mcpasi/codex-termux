@@ -23,6 +23,7 @@ use std::time::Duration;
 use crate::bwrap::BwrapNetworkMode;
 use crate::bwrap::BwrapOptions;
 use crate::bwrap::create_bwrap_command_args;
+use crate::exec_util::exec_or_panic;
 use crate::landlock::apply_permission_profile_to_current_thread;
 use crate::launcher::exec_bwrap;
 use crate::launcher::preferred_bwrap_supports_argv0;
@@ -1550,29 +1551,6 @@ fn build_inner_seccomp_command(args: InnerSeccompCommandArgs<'_>) -> Vec<String>
     inner.push("--".to_string());
     inner.extend(command);
     inner
-}
-
-/// Exec the provided argv, panicking with context if it fails.
-fn exec_or_panic(command: Vec<String>) -> ! {
-    #[expect(clippy::expect_used)]
-    let c_command =
-        CString::new(command[0].as_str()).expect("Failed to convert command to CString");
-    #[expect(clippy::expect_used)]
-    let c_args: Vec<CString> = command
-        .iter()
-        .map(|arg| CString::new(arg.as_str()).expect("Failed to convert arg to CString"))
-        .collect();
-
-    let mut c_args_ptrs: Vec<*const libc::c_char> = c_args.iter().map(|arg| arg.as_ptr()).collect();
-    c_args_ptrs.push(std::ptr::null());
-
-    unsafe {
-        libc::execvp(c_command.as_ptr(), c_args_ptrs.as_ptr());
-    }
-
-    // If execvp returns, there was an error.
-    let err = std::io::Error::last_os_error();
-    panic!("Failed to execvp {}: {err}", command[0].as_str());
 }
 
 #[cfg(test)]

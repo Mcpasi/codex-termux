@@ -51,7 +51,7 @@ ts-rs = { workspace = true, features = [
 uuid = { workspace = true, features = ["serde", "v7", "v4"] }
 wildmatch = { workspace = true }
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies]
 landlock = { workspace = true }
 seccompiler = { workspace = true }
 

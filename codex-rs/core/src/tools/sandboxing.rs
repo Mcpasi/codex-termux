@@ -235,16 +235,36 @@ pub(crate) enum SandboxOverride {
     BypassSandboxFirstAttempt,
 }
 
-/// True when this platform cannot provide a sandbox BY CONSTRUCTION: the
-/// Android/Termux build targets `aarch64-linux-android`, where
-/// `cfg!(target_os = "linux")` is false and no sandbox backend is compiled in
-/// at all (no seatbelt, no Linux seccomp/landlock helper, no Windows
-/// restricted token). This is a compile-time property of the binary, NOT a
-/// runtime probe: a Linux host whose sandbox is missing or broken must never
-/// match this — there the executor stays fail-closed. Tests inject the branch
-/// explicitly so they declare the platform instead of depending on the host.
+/// True when this platform cannot provide a sandbox: the Android/Termux build
+/// targets `aarch64-linux-android`, where the only backend is the Landlock LSM
+/// and that is compiled into the kernel only on some devices. When Landlock is
+/// present (`get_platform_sandbox` returns a backend) Android behaves like every
+/// other platform and stays fail-closed; only when there is genuinely no backend
+/// does an approved `exec`/`apply_patch` fall through to the unsandboxed path.
+///
+/// This is deliberately different from Linux/macOS/Windows: there a missing or
+/// broken sandbox is a misconfiguration the executor must refuse, so the
+/// `cfg!` short-circuit keeps them returning `false` without ever probing.
+/// Tests inject the branch explicitly via
+/// [`sandbox_unavailable_by_construction_from`] so they declare the platform
+/// instead of depending on the host.
 pub(crate) fn sandbox_unavailable_by_construction() -> bool {
-    cfg!(target_os = "android")
+    if !cfg!(target_os = "android") {
+        // Desktop platforms are never "unavailable by construction": a missing
+        // or broken sandbox there is a misconfiguration the executor refuses.
+        return false;
+    }
+    sandbox_unavailable_by_construction_from(
+        /*target_is_android*/ true,
+        codex_sandboxing::get_platform_sandbox(/*windows_sandbox_enabled*/ false),
+    )
+}
+
+fn sandbox_unavailable_by_construction_from(
+    target_is_android: bool,
+    platform_sandbox: Option<SandboxType>,
+) -> bool {
+    target_is_android && platform_sandbox.is_none()
 }
 
 pub(crate) fn sandbox_override_for_first_attempt(
