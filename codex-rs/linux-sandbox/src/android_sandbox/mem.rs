@@ -19,6 +19,21 @@ use std::path::Path;
 /// itself, so reading further is pointless.
 const PATH_MAX: usize = 4096;
 
+/// A tagged tracee pointer is a virtual address, not a `/proc/<pid>/mem`
+/// file offset. Android's arm64 allocator tags heap pointers in the top byte;
+/// passing that byte to `pread` produces EINVAL before any path can be checked.
+/// Only normalize the offset used by the supervisor, never the tracee's pointer.
+fn memory_offset(addr: u64) -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        addr & 0x00ff_ffff_ffff_ffff
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        addr
+    }
+}
+
 pub(crate) struct TraceeMemory {
     file: File,
 }
@@ -40,7 +55,7 @@ impl TraceeMemory {
     pub(crate) fn read_c_string(&self, addr: u64) -> io::Result<Vec<u8>> {
         const PAGE: u64 = 4096;
         let mut out: Vec<u8> = Vec::with_capacity(256);
-        let mut cursor = addr;
+        let mut cursor = memory_offset(addr);
 
         while out.len() < PATH_MAX {
             let to_page_end = PAGE - (cursor % PAGE);
@@ -67,7 +82,7 @@ impl TraceeMemory {
     /// Reads a little-endian `u64` (used for `struct open_how`).
     pub(crate) fn read_u64(&self, addr: u64) -> io::Result<u64> {
         let mut buffer = [0u8; 8];
-        self.file.read_exact_at(&mut buffer, addr)?;
+        self.file.read_exact_at(&mut buffer, memory_offset(addr))?;
         Ok(u64::from_le_bytes(buffer))
     }
 
@@ -77,15 +92,20 @@ impl TraceeMemory {
         if len == 0 {
             return true;
         }
+        let addr = memory_offset(addr);
+        let Some(last) = addr.checked_add(len as u64 - 1) else {
+            return false;
+        };
         let mut probe = [0u8; 1];
         self.file.read_exact_at(&mut probe, addr).is_ok()
-            && self
-                .file
-                .read_exact_at(&mut probe, addr + (len as u64 - 1))
-                .is_ok()
+            && self.file.read_exact_at(&mut probe, last).is_ok()
     }
 
     pub(crate) fn write_bytes(&self, addr: u64, data: &[u8]) -> io::Result<()> {
-        self.file.write_all_at(data, addr)
+        self.file.write_all_at(data, memory_offset(addr))
     }
 }
+
+#[cfg(test)]
+#[path = "mem_tests.rs"]
+mod tests;

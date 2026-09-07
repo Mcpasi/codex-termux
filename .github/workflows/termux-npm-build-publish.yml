@@ -165,7 +165,16 @@ jobs:
           chmod 0755 npm-package/bin/codex npm-package/bin/codex-exec npm-package/bin/codex.bin npm-package/bin/codex-code-mode-host
           chmod 0644 npm-package/bin/libc++_shared.so
           CODEX_PUBLIC_SANITIZED_TREE=1 bash verify-patches.sh
+          # Bind the local consumer's automatic pins to the revision that was
+          # actually built, even when a fork rebuild keeps its package version.
+          package_source_commit="$(git rev-parse HEAD)"
+          test "${package_source_commit}" = "${GITHUB_SHA}"
+          package_upstream_tag="$(node -p "(require('./npm-package/package.json').description.match(/upstream (rust-v[0-9]+\.[0-9]+\.[0-9]+)/)||[])[1]||''")"
+          test -n "${package_upstream_tag}"
+          package_upstream_commit="$(git rev-parse "${package_upstream_tag}^{commit}")"
+          git merge-base --is-ancestor "${package_upstream_commit}" "${package_source_commit}"
           cd npm-package
+          npm pkg set "gitHead=${package_source_commit}" "agentcodiUpstreamCommit=${package_upstream_commit}"
           rm -f ./*.tgz
           npm pack
           package_tgz="$(ls -1 *.tgz)"
@@ -182,6 +191,13 @@ jobs:
               exit 1
             fi
           done
+          tar -xOf "${package_tgz}" package/package.json > /tmp/codex-package-metadata.json
+          node -e '
+            const p = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"));
+            if (p.gitHead !== process.argv[2] || p.agentcodiUpstreamCommit !== process.argv[3]) {
+              throw new Error("tarball source provenance does not match the built revision");
+            }
+          ' /tmp/codex-package-metadata.json "${package_source_commit}" "${package_upstream_commit}"
           echo "tarball payload verified: codex.bin, codex-code-mode-host, libc++_shared.so"
           unpacked="$(node -p "require('child_process').execSync('npm pack --dry-run --json',{stdio:['ignore','pipe','ignore']}).toString().trim()" | node -p "JSON.parse(require('fs').readFileSync(0,'utf8'))[0].unpackedSize")"
           echo "unpacked size: ${unpacked} bytes"

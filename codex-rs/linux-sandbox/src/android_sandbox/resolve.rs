@@ -86,6 +86,29 @@ pub(crate) fn tracee_fd(path: &Path, proc_root: &Path, pid: i32) -> Option<i32> 
     name.parse::<i32>().ok().filter(|fd| *fd >= 0)
 }
 
+/// Android's linker reads `/proc/self/fd/N` after opening a library. Judge
+/// that metadata read against the file behind this tracee's descriptor, while
+/// leaving the actual readlink argument as a link (readlink on the resolved
+/// regular file would fail). This grants no access to another process's fds.
+pub(crate) fn readlink_policy_target(
+    path: &Path,
+    proc_root: &Path,
+    pid: i32,
+) -> io::Result<PathBuf> {
+    if let Some(fd) = tracee_fd(path, proc_root, pid)
+        && let DescriptorTarget::Path(target) = descriptor_target(proc_root, pid, fd)?
+    {
+        return Ok(resolve_path(
+            Path::new("/"),
+            &target,
+            proc_root,
+            pid,
+            FinalComponent::Follow,
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
 /// Rewrites the `/proc/self` and `/proc/thread-self` magic links so they mean
 /// what they mean *inside the tracee*.
 ///

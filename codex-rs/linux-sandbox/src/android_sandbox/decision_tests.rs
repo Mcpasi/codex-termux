@@ -179,6 +179,34 @@ fn android_minimal_engine(extra: Vec<FileSystemSandboxEntry>) -> PolicyEngine {
 }
 
 #[test]
+fn linker_fd_metadata_obeys_the_opened_files_read_permission() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    let proc_root = root.join("proc");
+    let fd_root = proc_root.join("4243/fd");
+    std::fs::create_dir_all(&fd_root).unwrap();
+    let library = root.join("native-library.so");
+    let private = root.join("private-sibling");
+    std::fs::write(&library, b"synthetic-library").unwrap();
+    std::fs::write(&private, b"synthetic-private").unwrap();
+    std::os::unix::fs::symlink(&library, fd_root.join("3")).unwrap();
+    std::os::unix::fs::symlink(&private, fd_root.join("4")).unwrap();
+    let policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry::new(
+        AbsolutePathBuf::try_from(library).unwrap().into(),
+        FileSystemAccessMode::Read,
+    )]);
+    let engine = PolicyEngine::new(policy, root, &proc_root, 4242).for_tracee(4243);
+
+    for (fd, tracee, allowed) in [(3, 4243, true), (4, 4243, false), (3, 4242, false)] {
+        let link = fd_root.join(fd.to_string());
+        let target =
+            super::super::resolve::readlink_policy_target(&link, &proc_root, tracee).unwrap();
+        assert_eq!(engine.check(&target, Access::Read).is_ok(), allowed);
+        assert!(engine.check(&target, Access::Write).is_err());
+    }
+}
+
+#[test]
 fn android_minimal_allows_platform_reads_and_workspace_writes_only() {
     let engine = android_minimal_engine(vec![]);
     for (path, access, allowed) in [

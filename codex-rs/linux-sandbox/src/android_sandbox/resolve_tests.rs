@@ -58,6 +58,46 @@ fn regular_tracee_fd_links_still_resolve_to_the_real_file_for_policy_checks() {
     );
 }
 
+#[test]
+fn linker_readlink_checks_the_opened_file_without_rewriting_the_link_to_a_file() {
+    let dir = temp_dir();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let proc_root = root.join("proc");
+    let fd_root = proc_root.join("4243/fd");
+    fs::create_dir_all(&fd_root).unwrap();
+    let library = root.join("native-library.so");
+    fs::write(&library, b"synthetic-library").unwrap();
+    let link = fd_root.join("3");
+    std::os::unix::fs::symlink(&library, &link).unwrap();
+    let argument = resolve_path(
+        &root,
+        &proc_root.join("self/fd/3"),
+        &proc_root,
+        4243,
+        FinalComponent::Keep,
+    );
+    assert_eq!(argument, link);
+    assert_eq!(
+        readlink_policy_target(&argument, &proc_root, 4243).unwrap(),
+        library
+    );
+    assert_eq!(
+        readlink_policy_target(&argument, &proc_root, 4242).unwrap(),
+        link
+    );
+
+    // An inherited private fd is judged against its actual private target,
+    // never against the allowed native-library root or the tracee's own pid.
+    let private = root.join("private-sibling");
+    fs::write(&private, b"synthetic-private").unwrap();
+    std::os::unix::fs::symlink(&private, fd_root.join("4")).unwrap();
+    assert_eq!(
+        readlink_policy_target(&fd_root.join("4"), &proc_root, 4243).unwrap(),
+        private
+    );
+    assert!(readlink_policy_target(&fd_root.join("99"), &proc_root, 4243).is_err());
+}
+
 /// `canonicalize` on the whole path fails for a file that is about to be
 /// created, which is exactly the case a creation check has to answer.
 #[test]

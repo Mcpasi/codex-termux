@@ -650,11 +650,16 @@ impl Supervisor {
                 continue;
             };
             let access = self.needed_access(pid, regs, path_arg)?;
+            let policy_target = if matches!(spec.name, "readlink" | "readlinkat") {
+                resolve::readlink_policy_target(&target, &self.config.proc_root, pid)?
+            } else {
+                target.clone()
+            };
             let tracee = self
                 .tracees
                 .get(&pid)
                 .ok_or_else(|| SandboxError::Other(format!("unknown tracee {pid}")))?;
-            if let Err(denial) = tracee.policy.check(&target, access) {
+            if let Err(denial) = tracee.policy.check(&policy_target, access) {
                 self.report(&format!("{denial} (syscall {})", spec.name));
                 return Ok(Some(libc::EACCES));
             }
