@@ -21,6 +21,8 @@
 
 pub(crate) mod decision;
 pub(crate) mod error;
+mod interception;
+mod platform;
 pub(crate) mod resolve;
 pub(crate) mod seccomp;
 pub(crate) mod syscalls;

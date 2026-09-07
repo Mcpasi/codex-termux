@@ -40,7 +40,11 @@ pub(crate) enum DescriptorTarget {
 /// `readlink` reports deleted files as `"<path> (deleted)"`; the suffix is
 /// stripped so an operation on an unlinked-but-open file is still judged
 /// against the directory it came from.
-pub(crate) fn descriptor_target(proc_root: &Path, pid: i32, fd: i32) -> io::Result<DescriptorTarget> {
+pub(crate) fn descriptor_target(
+    proc_root: &Path,
+    pid: i32,
+    fd: i32,
+) -> io::Result<DescriptorTarget> {
     let link = if fd == libc::AT_FDCWD {
         proc_root.join(pid.to_string()).join("cwd")
     } else if fd < 0 {
@@ -69,6 +73,17 @@ fn classify_descriptor_target(target: &Path) -> DescriptorTarget {
         Some(stripped) => DescriptorTarget::Path(PathBuf::from(stripped)),
         None => DescriptorTarget::Path(target.to_path_buf()),
     }
+}
+
+/// Recognizes one direct descriptor link of the stopped tracee, never another
+/// process or a path below an fd link.
+pub(crate) fn tracee_fd(path: &Path, proc_root: &Path, pid: i32) -> Option<i32> {
+    let root = proc_root.join(pid.to_string()).join("fd");
+    let name = path.strip_prefix(root).ok()?.to_str()?;
+    if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    name.parse::<i32>().ok().filter(|fd| *fd >= 0)
 }
 
 /// Rewrites the `/proc/self` and `/proc/thread-self` magic links so they mean
@@ -121,7 +136,7 @@ pub(crate) fn resolve_path(
     let joined = rebind_proc_self(&joined, proc_root, pid);
 
     match final_component {
-        FinalComponent::Follow => resolve_following_final(&joined),
+        FinalComponent::Follow => resolve_following_final(&joined, proc_root, pid),
         FinalComponent::Keep => resolve_keeping_final(&joined),
     }
 }
@@ -161,7 +176,7 @@ fn resolve_keeping_final(path: &Path) -> PathBuf {
 /// `open("workspace/link", O_CREAT|O_WRONLY)` with `link -> /etc/newfile` would
 /// look like a write inside the workspace while the kernel created a file
 /// outside it. The link is therefore expanded explicitly.
-fn resolve_following_final(path: &Path) -> PathBuf {
+fn resolve_following_final(path: &Path, proc_root: &Path, pid: i32) -> PathBuf {
     let mut current = resolve_keeping_final(path);
     for _ in 0..MAX_SYMLINK_HOPS {
         // `read_link` fails with `EINVAL` for anything that is not a symlink,
@@ -170,6 +185,14 @@ fn resolve_following_final(path: &Path) -> PathBuf {
         let Ok(target) = std::fs::read_link(&current) else {
             return current;
         };
+        // procfs anonymous descriptors are magic links, not relative names
+        // such as /proc/<pid>/fd/pipe:[123]. Keep the link for the supervisor
+        // to validate against this tracee's descriptor table.
+        if tracee_fd(&current, proc_root, pid).is_some()
+            && classify_descriptor_target(&target) == DescriptorTarget::NotAFile
+        {
+            return current;
+        }
         let next = if target.is_absolute() {
             target
         } else {

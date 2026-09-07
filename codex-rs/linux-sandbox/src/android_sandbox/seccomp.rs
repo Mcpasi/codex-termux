@@ -43,6 +43,17 @@ use super::syscalls;
 
 type Rules = BTreeMap<i64, Vec<SeccompRule>>;
 
+// CLONE_UNTRACED suppresses the inherited ptrace relationship. Namespaces
+// invalidate the supervisor's path view. Ordinary fork/thread flags remain valid.
+pub(super) const FORBIDDEN_CLONE_FLAGS: u64 = (libc::CLONE_UNTRACED
+    | libc::CLONE_NEWNS
+    | libc::CLONE_NEWCGROUP
+    | libc::CLONE_NEWUTS
+    | libc::CLONE_NEWIPC
+    | libc::CLONE_NEWUSER
+    | libc::CLONE_NEWPID
+    | libc::CLONE_NEWNET) as u64;
+
 /// How the network policy is expressed in the deny filter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum NetworkMode {
@@ -164,6 +175,21 @@ pub(crate) fn build_deny_filter(network: NetworkMode) -> Result<BpfProgram> {
     for nr in escape_denied_syscalls() {
         deny(&mut rules, nr);
     }
+    let clone_rules = (0..32)
+        .filter_map(|bit| {
+            let flag = 1u64 << bit;
+            (FORBIDDEN_CLONE_FLAGS & flag != 0).then_some(flag)
+        })
+        .map(|flag| {
+            SeccompRule::new(vec![SeccompCondition::new(
+                0,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::MaskedEq(flag),
+                flag,
+            )?])
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    rules.insert(libc::SYS_clone, clone_rules);
     if network == NetworkMode::Denied {
         network_deny_rules(&mut rules)?;
     }

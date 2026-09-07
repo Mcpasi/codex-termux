@@ -42,7 +42,10 @@ fn install(writable_roots: &[AbsolutePathBuf]) -> Result<(), landlock::RulesetEr
         .handle_access(access_rw)?
         .create()?
         .add_rules(landlock::path_beneath_rules(&["/"], access_ro))?
-        .add_rules(landlock::path_beneath_rules(&["/dev/null"], access_rw))?
+        .add_rules(landlock::path_beneath_rules(
+            &["/dev/null", "/dev/tty"],
+            access_rw,
+        ))?
         .set_no_new_privs(true);
 
     if !writable_roots.is_empty() {

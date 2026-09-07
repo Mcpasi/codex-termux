@@ -26,8 +26,8 @@
 //! * **Seccomp-directed** (the normal path): a `SECCOMP_RET_TRACE` filter stops
 //!   only the syscalls that matter, so ordinary reads and computation run at
 //!   full speed.
-//! * **Full syscall tracing** (fallback): if the kernel does not support
-//!   `PTRACE_O_TRACESECCOMP`, every syscall stops instead, and the supervisor
+//! * **Full syscall tracing** (fallback): if seccomp-directed interception
+//!   cannot be verified, every syscall stops instead, and the supervisor
 //!   additionally applies the network and escape deny-lists itself. Slower, but
 //!   it needs nothing beyond plain `ptrace`.
 //!
@@ -64,6 +64,9 @@ use super::decision::Access;
 use super::decision::PolicyEngine;
 use super::error::Result;
 use super::error::SandboxError;
+use super::interception;
+use super::interception::InterceptMode;
+use super::interception::ProbeAction;
 use super::mem::TraceeMemory;
 use super::resolve;
 use super::resolve::DescriptorTarget;
@@ -99,16 +102,6 @@ pub(crate) const SANDBOX_SETUP_FAILURE_EXIT_CODE: i32 = 9;
 /// a denied path cannot flood the transcript.
 const MAX_REPORTED_DENIALS: usize = 32;
 
-/// How the supervisor learns about syscalls.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InterceptMode {
-    /// Only the syscalls selected by the `SECCOMP_RET_TRACE` filter stop.
-    SeccompDirected,
-    /// Every syscall stops; the supervisor also enforces the deny-lists that
-    /// seccomp would normally handle.
-    AllSyscalls,
-}
-
 /// Byte handed to the child so it knows whether to install the trace filter.
 const MODE_SECCOMP: u8 = 0;
 const MODE_ALL_SYSCALLS: u8 = 1;
@@ -128,18 +121,20 @@ pub(crate) struct SupervisorConfig {
 
 /// Per-tracee bookkeeping.
 struct Tracee {
+    policy: PolicyEngine,
     /// Errno to install at the next syscall-exit stop, set when the entry stop
     /// cancelled the syscall.
     pending_errno: Option<i32>,
-    /// Only meaningful in [`InterceptMode::AllSyscalls`], where entry and exit
-    /// stops look identical and have to be counted.
+    /// Fallback counter for full tracing on architectures without a kernel
+    /// entry/exit marker. arm64 reads the kernel's direction instead.
     inside_syscall: bool,
     memory: Option<TraceeMemory>,
 }
 
 impl Tracee {
-    fn new() -> Self {
+    fn new(policy: PolicyEngine) -> Self {
         Self {
+            policy,
             pending_errno: None,
             inside_syscall: false,
             memory: None,
@@ -302,7 +297,7 @@ fn prepare_child(config: &SupervisorConfig, mode_pipe: &Pipe) -> Result<()> {
         }
     }
 
-    Ok(())
+    interception::verify_child(|| mode_pipe.read_byte())
 }
 
 fn set_no_new_privs() -> Result<()> {
@@ -371,29 +366,35 @@ fn run_supervisor(
         InterceptMode::SeccompDirected => MODE_SECCOMP,
         InterceptMode::AllSyscalls => MODE_ALL_SYSCALLS,
     })?;
-    drop(mode_pipe);
 
     SANDBOXED_PID.store(child, Ordering::SeqCst);
     install_signal_forwarding();
 
+    let denied_syscalls = match mode {
+        InterceptMode::SeccompDirected => HashSet::new(),
+        InterceptMode::AllSyscalls => supervisor_enforced_denials(config.network),
+    };
     let mut supervisor = Supervisor {
         config,
         mode,
+        probe_child: child,
+        probe_pipe: Some(mode_pipe),
+        probe_observed: false,
         tracees: HashMap::new(),
-        denied_syscalls: match mode {
-            InterceptMode::SeccompDirected => HashSet::new(),
-            InterceptMode::AllSyscalls => supervisor_enforced_denials(),
-        },
+        denied_syscalls,
         reported_denials: 0,
     };
-    supervisor.tracees.insert(child, Tracee::new());
+    supervisor.tracees.insert(
+        child,
+        Tracee::new(supervisor.config.policy.for_tracee(child)),
+    );
     supervisor.resume(child, 0)?;
 
     let result = supervisor.event_loop(child);
 
     // Surface a failed exec even though the child technically "ran".
     if let Ok(ChildStatus::Exited(code)) = &result
-        && *code == 127
+        && (*code == 127 || *code == SANDBOX_SETUP_FAILURE_EXIT_CODE)
         && let Some(message) = status_pipe.read_message()
     {
         eprintln!("codex-linux-sandbox: {message}");
@@ -405,6 +406,9 @@ fn run_supervisor(
 struct Supervisor {
     config: SupervisorConfig,
     mode: InterceptMode,
+    probe_child: libc::pid_t,
+    probe_pipe: Option<Pipe>,
+    probe_observed: bool,
     tracees: HashMap<libc::pid_t, Tracee>,
     /// Syscalls the supervisor refuses itself, used when seccomp could not be
     /// directed at them.
@@ -455,12 +459,39 @@ impl Supervisor {
         // A tracee created by `fork`/`clone` reports before we have ever seen
         // it. Its first stop is an artefact of attaching, never a real signal.
         if !self.tracees.contains_key(&pid) {
-            self.tracees.insert(pid, Tracee::new());
+            self.tracees
+                .insert(pid, Tracee::new(self.config.policy.for_tracee(pid)));
             return self.resume(pid, 0);
         }
 
         if signal == libc::SIGTRAP && event == PTRACE_EVENT_SECCOMP {
+            // Full tracing already checked the syscall at its entry stop.
+            if self.mode == InterceptMode::AllSyscalls {
+                return self.resume(pid, 0);
+            }
             return self.on_syscall_entry(pid);
+        }
+        if signal == libc::SIGSTOP
+            && pid == self.probe_child
+            && let Some(pipe) = self.probe_pipe.as_ref()
+        {
+            match interception::probe_action(self.mode, self.probe_observed) {
+                ProbeAction::Ready => {
+                    pipe.write_byte(interception::PROBE_READY)?;
+                    self.probe_pipe = None;
+                }
+                ProbeAction::RetryAllSyscalls => {
+                    self.mode = InterceptMode::AllSyscalls;
+                    self.denied_syscalls = supervisor_enforced_denials(self.config.network);
+                    pipe.write_byte(interception::PROBE_RETRY)?;
+                }
+                ProbeAction::Refuse => {
+                    return Err(SandboxError::Other(
+                        "filesystem syscall interception produced no events".to_string(),
+                    ));
+                }
+            }
+            return self.resume(pid, 0);
         }
         if signal == libc::SIGTRAP && event == PTRACE_EVENT_EXEC {
             // The address space is new, so the cached `/proc/<pid>/mem` handle
@@ -498,6 +529,11 @@ impl Supervisor {
         }
 
         let all_syscalls = self.mode == InterceptMode::AllSyscalls;
+        let kernel_entry = if all_syscalls {
+            arch::syscall_entry(pid)?
+        } else {
+            None
+        };
         // Classify while only the tracee map is borrowed, so the handling below
         // is free to take `&mut self` again.
         let stop = match self.tracees.get_mut(&pid) {
@@ -510,10 +546,10 @@ impl Supervisor {
                 // With seccomp directing the stops, only cancelled syscalls are
                 // followed to their exit, and that case is handled above.
                 None if !all_syscalls => Stop::Passthrough,
-                // Without it, entry and exit stops are indistinguishable and
-                // have to be counted.
+                // Prefer the kernel's direction over counting across exec,
+                // cloned children and interception-mode changes.
                 None => {
-                    let entering = !tracee.inside_syscall;
+                    let entering = kernel_entry.unwrap_or(!tracee.inside_syscall);
                     tracee.inside_syscall = entering;
                     if entering {
                         Stop::Entering
@@ -538,17 +574,29 @@ impl Supervisor {
 
     fn on_syscall_entry(&mut self, pid: libc::pid_t) -> Result<()> {
         let mut regs = Regs::read(pid)?;
-        let errno = match self.evaluate(pid, &mut regs) {
-            Ok(None) => None,
-            Ok(Some(errno)) => Some(errno),
-            Err(err) => {
-                // The supervisor could not establish what the syscall would
-                // touch. Refusing is the only safe answer: allowing would mean
-                // running an unchecked operation.
-                self.report(&format!(
-                    "refusing an unverifiable syscall from pid {pid}: {err}"
-                ));
-                Some(libc::EACCES)
+        let errno = if self.probe_pipe.is_some()
+            && pid == self.probe_child
+            && interception::is_probe(
+                regs.syscall_number(),
+                regs.argument(0),
+                regs.argument(1),
+                regs.argument(2),
+            ) {
+            self.probe_observed = true;
+            Some(libc::EACCES)
+        } else {
+            match self.evaluate(pid, &mut regs) {
+                Ok(None) => None,
+                Ok(Some(errno)) => Some(errno),
+                Err(err) => {
+                    // The supervisor could not establish what the syscall would
+                    // touch. Refusing is the only safe answer: allowing would mean
+                    // running an unchecked operation.
+                    self.report(&format!(
+                        "refusing an unverifiable syscall from pid {pid}: {err}"
+                    ));
+                    Some(libc::EACCES)
+                }
             }
         };
 
@@ -569,6 +617,15 @@ impl Supervisor {
     fn evaluate(&mut self, pid: libc::pid_t, regs: &mut Regs) -> Result<Option<i32>> {
         let nr = regs.syscall_number();
 
+        if self.mode == InterceptMode::AllSyscalls && nr == libc::SYS_clone3 {
+            return Ok(Some(libc::ENOSYS));
+        }
+        if self.mode == InterceptMode::AllSyscalls
+            && nr == libc::SYS_clone
+            && regs.argument(0) & seccomp::FORBIDDEN_CLONE_FLAGS != 0
+        {
+            return Ok(Some(libc::EPERM));
+        }
         if self.denied_syscalls.contains(&nr) {
             return Ok(Some(libc::EPERM));
         }
@@ -593,7 +650,11 @@ impl Supervisor {
                 continue;
             };
             let access = self.needed_access(pid, regs, path_arg)?;
-            if let Err(denial) = self.config.policy.check(&target, access) {
+            let tracee = self
+                .tracees
+                .get(&pid)
+                .ok_or_else(|| SandboxError::Other(format!("unknown tracee {pid}")))?;
+            if let Err(denial) = tracee.policy.check(&target, access) {
                 self.report(&format!("{denial} (syscall {})", spec.name));
                 return Ok(Some(libc::EACCES));
             }
@@ -636,14 +697,14 @@ impl Supervisor {
             Need::Write => Access::Write,
             Need::WriteName => Access::WriteName,
             Need::OpenFlags(index) => match syscalls::need_from_open_flags(regs.argument(index)) {
-                Need::WriteName => Access::WriteName,
+                Need::WriteName => Access::WriteOpen,
                 Need::Write => Access::Write,
                 _ => Access::Read,
             },
             Need::OpenHow(index) => {
                 let flags = self.read_open_how_flags(pid, regs.argument(index))?;
                 match syscalls::need_from_open_flags(flags) {
-                    Need::WriteName => Access::WriteName,
+                    Need::WriteName => Access::WriteOpen,
                     Need::Write => Access::Write,
                     _ => Access::Read,
                 }
@@ -707,7 +768,13 @@ impl Supervisor {
                 // A closed or invalid descriptor: the kernel answers `EBADF`,
                 // and letting it do so keeps the tracee's error handling
                 // intact.
-                Err(_) => return Ok(None),
+                Err(err)
+                    if err.raw_os_error() == Some(libc::EBADF)
+                        || (base_fd >= 0 && err.kind() == io::ErrorKind::NotFound) =>
+                {
+                    return Ok(None);
+                }
+                Err(err) => return Err(err.into()),
             }
         };
 
@@ -746,13 +813,20 @@ impl Supervisor {
             }
         };
 
-        Ok(Some(resolve::resolve_path(
+        let target = resolve::resolve_path(
             &base,
             &raw_path,
             &self.config.proc_root,
             pid,
             final_component,
-        )))
+        );
+        if let Some(fd) = resolve::tracee_fd(&target, &self.config.proc_root, pid)
+            && resolve::descriptor_target(&self.config.proc_root, pid, fd)?
+                == DescriptorTarget::NotAFile
+        {
+            return Ok(None);
+        }
+        Ok(Some(target))
     }
 
     /// Points the syscall at the canonical path that was validated.
@@ -875,9 +949,7 @@ impl Supervisor {
 /// A tracee can exit between its stop and our resume; that is not an error.
 fn ignore_vanished(result: Result<()>) -> Result<()> {
     match result {
-        Err(SandboxError::Ptrace { source, .. })
-            if source.raw_os_error() == Some(libc::ESRCH) =>
-        {
+        Err(SandboxError::Ptrace { source, .. }) if source.raw_os_error() == Some(libc::ESRCH) => {
             Ok(())
         }
         other => other,
@@ -886,10 +958,12 @@ fn ignore_vanished(result: Result<()>) -> Result<()> {
 
 /// Syscalls the supervisor refuses itself when seccomp could not be directed at
 /// them. Mirrors the deny filter in [`super::seccomp`].
-fn supervisor_enforced_denials() -> HashSet<i64> {
+fn supervisor_enforced_denials(network: NetworkMode) -> HashSet<i64> {
     let mut denied: HashSet<i64> = HashSet::new();
     denied.extend(seccomp::escape_denied_syscalls());
-    denied.extend(seccomp::network_denied_syscalls());
+    if network == NetworkMode::Denied {
+        denied.extend(seccomp::network_denied_syscalls());
+    }
     denied
 }
 
@@ -965,7 +1039,11 @@ impl Pipe {
         let bytes = message.as_bytes();
         // SAFETY: writing a live buffer to an owned descriptor.
         unsafe {
-            libc::write(self.write, bytes.as_ptr().cast::<libc::c_void>(), bytes.len());
+            libc::write(
+                self.write,
+                bytes.as_ptr().cast::<libc::c_void>(),
+                bytes.len(),
+            );
         }
     }
 

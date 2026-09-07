@@ -21,6 +21,27 @@ const NT_ARM_SYSTEM_CALL: libc::c_int = 0x404;
 /// syscall the policy refused.
 const CANCELLED_SYSCALL: i64 = -1;
 
+/// arm64 report_syscall() marks entry/exit in x7 (0/1). Counting stops loses
+/// synchronization across exec, cloned children and a tracing-mode change.
+/// https://github.com/torvalds/linux/blob/v6.1/arch/arm64/kernel/ptrace.c#L1965
+pub(crate) fn syscall_entry(pid: libc::pid_t) -> Result<Option<bool>> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        match Regs::read(pid)?.raw.regs[7] {
+            0 => Ok(Some(true)),
+            1 => Ok(Some(false)),
+            _ => Err(SandboxError::Other(
+                "invalid arm64 syscall stop phase".to_string(),
+            )),
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        let _ = pid;
+        Ok(None)
+    }
+}
+
 /// True when this build knows how to read the tracee's registers.
 pub(crate) const fn supported() -> bool {
     cfg!(any(target_arch = "aarch64", target_arch = "x86_64"))
@@ -56,6 +77,15 @@ impl Regs {
             )
         };
         ptrace_result("PTRACE_GETREGSET(NT_PRSTATUS)", ret)?;
+        if iov.iov_len != size_of::<libc::user_regs_struct>() {
+            return Err(SandboxError::UnsupportedArchitecture);
+        }
+        #[cfg(target_arch = "aarch64")]
+        if raw.pstate & 0x10 != 0 {
+            // AArch32 uses a different syscall table. This also enforces the
+            // ABI boundary when a surrounding tracer suppresses seccomp.
+            return Err(SandboxError::UnsupportedArchitecture);
+        }
         Ok(Self { raw })
     }
 

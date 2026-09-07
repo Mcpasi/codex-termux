@@ -12,6 +12,9 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::ReadDenyMatcher;
+
+use super::platform;
 
 /// What an intercepted path argument needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,6 +24,8 @@ pub(crate) enum Access {
     Write,
     /// Create or remove a name: the object *and* the directory holding it.
     WriteName,
+    /// Open with O_CREAT; existing platform devices do not create a name.
+    WriteOpen,
 }
 
 /// Why a syscall was refused, for the diagnostic the tracee's stderr gets.
@@ -51,21 +56,42 @@ pub(crate) struct PolicyEngine {
     reads_restricted: bool,
     /// `<proc_root>/<supervisor pid>`, precomputed for the escape check above.
     supervisor_proc_dir: PathBuf,
+    proc_root: PathBuf,
+    read_denials: Option<ReadDenyMatcher>,
 }
 
 impl PolicyEngine {
     pub(crate) fn new(
-        policy: FileSystemSandboxPolicy,
+        mut policy: FileSystemSandboxPolicy,
         policy_cwd: PathBuf,
         proc_root: &Path,
         supervisor_pid: i32,
     ) -> Self {
+        platform::add_defaults(&mut policy);
         let reads_restricted = !policy.has_full_disk_read_access();
+        let read_denials = ReadDenyMatcher::new(&policy, &policy_cwd);
         Self {
             policy,
             policy_cwd,
             reads_restricted,
             supervisor_proc_dir: proc_root.join(supervisor_pid.to_string()),
+            proc_root: proc_root.to_path_buf(),
+            read_denials,
+        }
+    }
+
+    /// Each traced child gets only its own bounded process metadata defaults.
+    pub(crate) fn for_tracee(&self, tracee_pid: i32) -> Self {
+        let mut policy = self.policy.clone();
+        platform::add_tracee_reads(&mut policy, &self.proc_root, tracee_pid);
+        let read_denials = ReadDenyMatcher::new(&policy, &self.policy_cwd);
+        Self {
+            policy,
+            policy_cwd: self.policy_cwd.clone(),
+            reads_restricted: self.reads_restricted,
+            supervisor_proc_dir: self.supervisor_proc_dir.clone(),
+            proc_root: self.proc_root.clone(),
+            read_denials,
         }
     }
 
@@ -86,25 +112,33 @@ impl PolicyEngine {
             });
         }
 
-        let granted = match access {
-            Access::Read => self.policy.can_read_path_with_cwd(path, &self.policy_cwd),
-            Access::Write => self.policy.can_write_path_with_cwd(path, &self.policy_cwd),
-            Access::WriteName => {
-                self.policy.can_write_path_with_cwd(path, &self.policy_cwd)
-                    && match path.parent() {
-                        // Adding or removing a name mutates the directory that
-                        // holds it, so the directory has to be writable too.
-                        // Without this, a policy that grants write to a single
-                        // file inside a read-only directory would still allow
-                        // that file to be deleted or replaced.
-                        Some(parent) => {
-                            self.policy.can_write_path_with_cwd(parent, &self.policy_cwd)
-                        }
-                        // No parent means the filesystem root itself.
-                        None => false,
-                    }
-            }
-        };
+        let denied = self
+            .read_denials
+            .as_ref()
+            .is_some_and(|matcher| matcher.is_read_denied(path));
+        let granted = !denied
+            && match access {
+                Access::Read => self.policy.can_read_path_with_cwd(path, &self.policy_cwd),
+                Access::Write => self.policy.can_write_path_with_cwd(path, &self.policy_cwd),
+                Access::WriteName | Access::WriteOpen => {
+                    self.policy.can_write_path_with_cwd(path, &self.policy_cwd)
+                        && ((access == Access::WriteOpen
+                            && self.policy.include_platform_defaults()
+                            && platform::is_writable_device(path))
+                            || match path.parent() {
+                                // Adding or removing a name mutates the directory that
+                                // holds it, so the directory has to be writable too.
+                                // Without this, a policy that grants write to a single
+                                // file inside a read-only directory would still allow
+                                // that file to be deleted or replaced.
+                                Some(parent) => self
+                                    .policy
+                                    .can_write_path_with_cwd(parent, &self.policy_cwd),
+                                // No parent means the filesystem root itself.
+                                None => false,
+                            })
+                }
+            };
 
         if granted {
             Ok(())
@@ -124,6 +158,7 @@ impl std::fmt::Display for Denial {
             Access::Read => "read",
             Access::Write => "write",
             Access::WriteName => "create/remove",
+            Access::WriteOpen => "open for writing",
         };
         match self.reason {
             DenialReason::PolicyDenied => write!(

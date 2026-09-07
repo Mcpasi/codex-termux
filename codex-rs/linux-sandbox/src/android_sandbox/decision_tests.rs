@@ -86,7 +86,11 @@ fn read_narrowing_is_enforced() {
         engine.check(Path::new("/workspace/README.md"), Access::Read),
         Ok(())
     );
-    assert!(engine.check(Path::new("/etc/passwd"), Access::Read).is_err());
+    assert!(
+        engine
+            .check(Path::new("/etc/passwd"), Access::Read)
+            .is_err()
+    );
     assert!(
         engine
             .check(Path::new("/workspace/README.md"), Access::Write)
@@ -152,4 +156,125 @@ fn denials_explain_themselves() {
     let message = denial.to_string();
     assert!(message.contains("write"), "{message}");
     assert!(message.contains("/etc/passwd"), "{message}");
+}
+
+fn android_minimal_engine(extra: Vec<FileSystemSandboxEntry>) -> PolicyEngine {
+    let workspace = AbsolutePathBuf::try_from("/private/workspace").unwrap();
+    let mut entries = vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Minimal,
+            },
+            FileSystemAccessMode::Read,
+        ),
+        FileSystemSandboxEntry::new(workspace.into(), FileSystemAccessMode::Write),
+    ];
+    entries.extend(extra);
+    PolicyEngine::new(
+        FileSystemSandboxPolicy::restricted(entries),
+        PathBuf::from("/private/workspace"),
+        Path::new("/proc"),
+        4242,
+    )
+}
+
+#[test]
+fn android_minimal_allows_platform_reads_and_workspace_writes_only() {
+    let engine = android_minimal_engine(vec![]);
+    for (path, access, allowed) in [
+        ("/system/bin/sh", Access::Read, true),
+        (
+            "/apex/com.android.runtime/lib64/bionic/libc.so",
+            Access::Read,
+            true,
+        ),
+        ("/linkerconfig/ld.config.txt", Access::Read, true),
+        ("/dev/__properties__/properties_serial", Access::Read, true),
+        ("/system/bin/sh", Access::Write, false),
+        ("/private/workspace/new-file", Access::WriteOpen, true),
+        ("/private/home/fixture", Access::Read, false),
+        ("/private/codex-home/fixture", Access::Read, false),
+        ("/data/app/pkg/lib/libnode.so", Access::Read, false),
+        ("/data/user/0/other/files/fixture", Access::Write, false),
+        ("/dev/null", Access::WriteOpen, true),
+        ("/dev/null", Access::WriteName, false),
+        ("/dev/new-device", Access::WriteOpen, false),
+        ("/dev/urandom", Access::WriteOpen, false),
+    ] {
+        assert_eq!(
+            engine.check(Path::new(path), access).is_ok(),
+            allowed,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn packaged_alias_target_needs_its_exact_native_payload_grant() {
+    let native = AbsolutePathBuf::try_from("/data/app/pkg/lib").unwrap();
+    let engine = android_minimal_engine(vec![FileSystemSandboxEntry::new(
+        native.into(),
+        FileSystemAccessMode::Read,
+    )]);
+    for (path, access, allowed) in [
+        ("/data/app/pkg/lib/libnode.so", Access::Read, true),
+        ("/data/app/pkg/lib/libnode.so", Access::Write, false),
+        ("/data/app/other/lib/libnode.so", Access::Read, false),
+    ] {
+        assert_eq!(
+            engine.check(Path::new(path), access).is_ok(),
+            allowed,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn minimal_tracee_metadata_never_grants_parent_process_or_environment() {
+    let engine = android_minimal_engine(vec![]).for_tracee(4243);
+    for (path, access, allowed) in [
+        ("/proc/4243/exe", Access::Read, true),
+        ("/proc/4243/cmdline", Access::Read, true),
+        ("/proc/4243/maps", Access::Read, true),
+        ("/proc/4243/status", Access::Read, true),
+        ("/proc/4242/cmdline", Access::Read, false),
+        ("/proc/4244/cmdline", Access::Read, false),
+        ("/proc/4243/maps", Access::Write, false),
+        ("/proc/4243/mem", Access::Read, false),
+        ("/proc/4243/environ", Access::Read, false),
+        ("/proc/4243/root", Access::Read, false),
+        ("/proc/4243/fd/4", Access::Read, false),
+    ] {
+        assert_eq!(
+            engine.check(Path::new(path), access).is_ok(),
+            allowed,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn explicit_denials_still_apply_to_android_platform_defaults() {
+    let entries = ["/system/bin", "/dev/null", "/proc/4243/maps"]
+        .into_iter()
+        .map(|path| {
+            FileSystemSandboxEntry::new(
+                AbsolutePathBuf::try_from(path).unwrap().into(),
+                FileSystemAccessMode::Deny,
+            )
+        })
+        .collect();
+    let engine = android_minimal_engine(entries).for_tracee(4243);
+    for (path, access, allowed) in [
+        ("/system/bin/sh", Access::Read, false),
+        ("/dev/null", Access::WriteOpen, false),
+        ("/proc/4243/maps", Access::Read, false),
+        ("/system/etc/hosts", Access::Read, true),
+    ] {
+        assert_eq!(
+            engine.check(Path::new(path), access).is_ok(),
+            allowed,
+            "{path}"
+        );
+    }
 }

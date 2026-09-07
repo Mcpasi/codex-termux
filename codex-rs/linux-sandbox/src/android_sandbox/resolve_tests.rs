@@ -6,6 +6,58 @@ fn temp_dir() -> tempfile::TempDir {
     tempfile::tempdir().expect("temp dir")
 }
 
+#[test]
+fn anonymous_tracee_fd_links_remain_kernel_links_instead_of_fake_filenames() {
+    let dir = temp_dir();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let proc_root = root.join("proc");
+    let fd_root = proc_root.join("4243/fd");
+    fs::create_dir_all(&fd_root).unwrap();
+    std::os::unix::fs::symlink("pipe:[1234]", fd_root.join("7")).unwrap();
+    let path = resolve_path(
+        &root,
+        &proc_root.join("self/fd/7"),
+        &proc_root,
+        4243,
+        FinalComponent::Follow,
+    );
+    assert_eq!(path, fd_root.join("7"));
+    assert_eq!(tracee_fd(&path, &proc_root, 4243), Some(7));
+    assert_eq!(
+        descriptor_target(&proc_root, 4243, 7).unwrap(),
+        DescriptorTarget::NotAFile
+    );
+    assert_eq!(tracee_fd(&path, &proc_root, 4242), None);
+    assert_eq!(tracee_fd(&fd_root.join("7/child"), &proc_root, 4243), None);
+    assert_eq!(tracee_fd(&fd_root.join("-1"), &proc_root, 4243), None);
+    assert_eq!(
+        tracee_fd(&fd_root.join("999999999999999999"), &proc_root, 4243),
+        None
+    );
+}
+
+#[test]
+fn regular_tracee_fd_links_still_resolve_to_the_real_file_for_policy_checks() {
+    let dir = temp_dir();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let proc_root = root.join("proc");
+    let fd_root = proc_root.join("4243/fd");
+    fs::create_dir_all(&fd_root).unwrap();
+    let private = root.join("synthetic-private-file");
+    fs::write(&private, b"fixture").unwrap();
+    std::os::unix::fs::symlink(&private, fd_root.join("7")).unwrap();
+    assert_eq!(
+        resolve_path(
+            &root,
+            &proc_root.join("self/fd/7"),
+            &proc_root,
+            4243,
+            FinalComponent::Follow
+        ),
+        private
+    );
+}
+
 /// `canonicalize` on the whole path fails for a file that is about to be
 /// created, which is exactly the case a creation check has to answer.
 #[test]
