@@ -35,7 +35,6 @@ use seccompiler::SeccompCondition;
 use seccompiler::SeccompFilter;
 use seccompiler::SeccompRule;
 use seccompiler::TargetArch;
-use seccompiler::apply_filter;
 
 use super::error::Result;
 use super::error::SandboxError;
@@ -273,6 +272,45 @@ fn write_intent_rules(flags_arg: usize) -> Result<Vec<SeccompRule>> {
         )?])?);
     }
     Ok(rules)
+}
+
+/// Install the same BPF through Android's established prctl entry point. The
+/// standalone seccomp syscall has a separate entry in inherited app allowlists
+/// and may raise SIGSYS even though PR_SET_SECCOMP is usable. This launcher is
+/// single-threaded; it does not need seccomp(2)'s TSYNC or listener flags.
+fn apply_filter(filter: &[seccompiler::sock_filter]) -> Result<()> {
+    if filter.is_empty() || filter.len() > 4096 {
+        return Err(SandboxError::Seccomp(
+            "invalid BPF program length".to_string(),
+        ));
+    }
+    #[repr(C)]
+    struct FilterProgram {
+        len: u16,
+        filter: *const seccompiler::sock_filter,
+    }
+    let program = FilterProgram {
+        len: filter.len() as u16,
+        filter: filter.as_ptr(),
+    };
+    // SAFETY: scalar prctl arguments; the kernel copies the live repr(C)
+    // program and its bounded filter array without changing their contents.
+    unsafe {
+        if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0
+            || libc::prctl(
+                libc::PR_SET_SECCOMP,
+                libc::SECCOMP_MODE_FILTER,
+                std::ptr::addr_of!(program),
+                0,
+                0,
+            ) != 0
+        {
+            return Err(SandboxError::Seccomp(
+                std::io::Error::last_os_error().to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Installs the two `errno` filters.

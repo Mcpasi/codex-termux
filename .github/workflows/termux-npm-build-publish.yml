@@ -13,8 +13,43 @@ on:
   workflow_dispatch:
 
 jobs:
+  sandbox-regressions:
+    name: Android sandbox syscall regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    env:
+      RUSTUP_TOOLCHAIN: "1.95.0"
+      RUST_MIN_STACK: "8388608"
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - name: Install host dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libcap-dev protobuf-compiler
+          rustup toolchain install 1.95.0 --profile minimal
+      - name: Install test runner
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: just,nextest
+      - name: Verify Android sandbox under inherited syscall restrictions
+        shell: bash
+        run: |
+          set -euo pipefail
+          # These Linux-host tests install real inherited seccomp TRAP/KILL
+          # rules. A cross-compiled Android ELF alone cannot exercise them.
+          just test -p codex-linux-sandbox --lib --no-tests=fail -E 'test(android_sandbox::)'
+
   build-android-arm64:
     name: Build Android ARM64
+    needs: sandbox-regressions
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:

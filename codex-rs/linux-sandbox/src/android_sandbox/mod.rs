@@ -29,7 +29,7 @@ pub(crate) mod syscalls;
 
 #[cfg(target_os = "android")]
 mod arch;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 mod landlock_layer;
 #[cfg(any(target_os = "android", test))]
 mod mem;

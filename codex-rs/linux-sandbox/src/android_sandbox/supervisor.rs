@@ -176,12 +176,21 @@ fn exit_like(status: ChildStatus) -> ! {
     }
 }
 
-fn supervise(config: SupervisorConfig, command: Vec<String>) -> Result<ChildStatus> {
+fn supervise(mut config: SupervisorConfig, command: Vec<String>) -> Result<ChildStatus> {
     if !arch::supported() {
         return Err(SandboxError::UnsupportedArchitecture);
     }
 
     let argv = to_cstrings(&command)?;
+
+    // Android app filters can kill forbidden Landlock calls with SIGSYS.
+    // Check before creating any tracee, so the optional probe cannot terminate
+    // the real filesystem helper, inherit its ptrace state or consume events.
+    if let Some(roots) = &config.landlock_writable_roots
+        && !super::landlock_layer::is_supported(roots)
+    {
+        config.landlock_writable_roots = None;
+    }
 
     // Child -> parent: setup failures. The write end is close-on-exec, so a
     // successful `execvp` closes it and the parent reads EOF.
@@ -280,8 +289,8 @@ fn prepare_child(config: &SupervisorConfig, mode_pipe: &Pipe) -> Result<()> {
 
     set_no_new_privs()?;
 
-    // Best effort only: this is the layer that is absent on many devices, and
-    // the whole point of the supervisor is that nothing depends on it.
+    // Only present after all Landlock installation calls passed the isolated
+    // capability probe. The verified ptrace boundary is mandatory either way.
     if let Some(roots) = &config.landlock_writable_roots {
         super::landlock_layer::apply_best_effort(roots);
     }
@@ -509,6 +518,31 @@ impl Supervisor {
         }
         if signal == SYSCALL_TRAP {
             return self.on_syscall_stop(pid);
+        }
+
+        if signal == libc::SIGSYS {
+            // Include only the syscall number, never argument buffers or
+            // paths. Preserve the fatal signal; this is no permission retry.
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            // SAFETY: pid is stopped and info is a live siginfo_t output buffer.
+            let result = unsafe {
+                libc::ptrace(
+                    libc::PTRACE_GETSIGINFO,
+                    pid,
+                    std::ptr::null_mut::<libc::c_void>(),
+                    std::ptr::addr_of_mut!(info).cast::<libc::c_void>(),
+                )
+            };
+            if result == 0
+                && info.si_code == 1 // SYS_SECCOMP, not a user-generated SIGSYS.
+                && let Ok(regs) = Regs::read(pid)
+            {
+                // A fatal diagnostic must survive the ordinary denial limit.
+                eprintln!(
+                    "codex-linux-sandbox: Android seccomp blocked syscall {}; execution stopped (SIGSYS)",
+                    regs.syscall_number()
+                );
+            }
         }
 
         // A real signal for the tracee; pass it through.
