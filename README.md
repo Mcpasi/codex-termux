@@ -87,6 +87,7 @@ Maintainer publish flow:
 
 - [Changelog](./CHANGELOG.md)
 - [Patch inventory](./patches/README.md)
+- [Android sandbox](./docs/android_sandbox.md)
 - [Building from source](./BUILDING.md)
 - [Install docs](./docs/install.md)
 - [Authentication](./docs/authentication.md)

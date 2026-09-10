@@ -22,6 +22,15 @@ none of them is acceptable for a product that has to run on arbitrary hardware:
 So the Android backend does not use Landlock as its mechanism. Landlock is still
 applied when the kernel happens to offer it, purely as an extra layer.
 
+Before the optional Landlock layer is enabled, its complete setup is tested in
+a disposable child process. This includes ruleset creation, rule installation
+and `restrict_self()`.
+
+This protects the sandbox launcher from Android kernels or inherited seccomp
+policies that reject Landlock syscalls with `SIGSYS` instead of returning an
+ordinary error. A failed probe disables only the optional Landlock layer. The
+seccomp/ptrace supervisor remains the enforced sandbox boundary.
+
 ## What is used instead
 
 Two kernel features that **every** Android device is required to have:
