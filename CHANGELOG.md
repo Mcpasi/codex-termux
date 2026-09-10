@@ -1,13 +1,44 @@
-# [0.153.3-agentcodi.1] - 2026-09-06
+# [0.153.3-agentcodi.1] - 2026-09-10
 
-## Codex Termux 0.153.3-agentcodi.1 — agentcodi build line
+## Android sandbox backend
 
-- Republishes the `0.153.3` tree on the `agentcodi` build line: the npm package
-  and the Cargo workspace both report `0.153.3-agentcodi.1`. No functional
-  change over `0.153.3`.
-- The update check in the TUI and in `codex doctor` treats an `agentcodi`
-  prerelease as its own patch level, so builds on this line are not reported as
-  out of date against the published `0.153.3`.
+This build line adds a native Android sandbox backend for Termux and Android
+applications embedding the Codex app-server.
+
+### Added
+
+- Added an Android sandbox backend based on seccomp-BPF and ptrace.
+- Filesystem policy is enforced by a supervising `codex-linux-sandbox`
+  process instead of depending on the Landlock LSM.
+- Path-carrying syscalls are intercepted and resolved against the tracee's
+  working directory, directory file descriptors, symlinks and `/proc/self`
+  before the configured filesystem policy is applied.
+- Read narrowing and deny-read rules are enforced by the Android supervisor.
+- Added a fallback for kernels without `PTRACE_O_TRACESECCOMP` that monitors
+  every syscall through ptrace.
+- Added dedicated Android sandbox regression tests to the Android build
+  workflow.
+
+### Security
+
+- The Android sandbox fails closed if supervision cannot be established.
+- Tracees use `PTRACE_O_EXITKILL`, preventing them from continuing if the
+  supervisor disappears.
+- Network, namespace, mount, ptrace, `process_vm_*`, `io_uring_*`,
+  `userfaultfd` and other sandbox-bypass paths are denied.
+- Optional Landlock hardening is tested in a disposable child before use.
+  Android kernels or inherited seccomp policies that reject Landlock with
+  `SIGSYS` therefore do not terminate the supervised command.
+- Landlock remains an optional additional layer only. The enforced Android
+  filesystem boundary does not depend on it.
+
+### Compatibility
+
+- The package remains `@mmmbuto/codex-cli-termux` for Android ARM64
+  (Android 10+ / API 29+).
+- The upstream base remains OpenAI Codex `rust-v0.153.2`.
+
+Copyright 2026  Pascal (Mc Pasi) 
 
 # [0.153.3] - 2026-09-05
 
