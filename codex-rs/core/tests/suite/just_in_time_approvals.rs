@@ -31,12 +31,15 @@ use serde_json::json;
 use std::collections::HashMap;
 use test_case::test_case;
 
-async fn harness(tool: &'static str, policy: AskForApproval) -> Result<TestCodexHarness> {
+/// `mode` selects how `exec_command` is exposed. Disabling unified exec keeps the
+/// same tool name and registers it one-shot: no resumable session, no
+/// `write_stdin`, and `timeout_ms` in place of `yield_time_ms`.
+async fn harness(mode: &'static str, policy: AskForApproval) -> Result<TestCodexHarness> {
     TestCodexHarness::with_auto_env_builder(test_codex().with_config(move |config| {
         config.features.enable(Feature::JustInTimeApprovals).expect("enable just-in-time approvals");
         config.features.disable(Feature::WriteStdinApproval).expect("disable ordinary stdin reviews");
-        if tool == "shell" {
-            config.features.disable(Feature::UnifiedExec).expect("use shell tool");
+        if mode == "one_shot" {
+            config.features.disable(Feature::UnifiedExec).expect("use one-shot exec_command");
         } else {
             config.features.enable(Feature::UnifiedExec).expect("use unified exec");
         }
@@ -94,21 +97,23 @@ async fn decide_and_finish(
     Ok(())
 }
 
-#[test_case("shell")]
-#[test_case("exec_command")]
+#[test_case("one_shot")]
+#[test_case("session")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn repeated_commands_wait_for_a_human_and_denial_has_no_side_effect(
-    tool: &'static str,
+    mode: &'static str,
 ) -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX shell command");
     skip_if_no_network!(Ok(()));
-    let harness = harness(tool, AskForApproval::OnRequest).await?;
+    let harness = harness(mode, AskForApproval::OnRequest).await?;
     let rules_path = harness.test().codex_home_path().join("rules/default.rules");
     let original_rules = std::fs::read_to_string(&rules_path)?;
-    let args = if tool == "shell" {
-        json!({"command":["/bin/sh", "-c", "printf x >> result"]})
+    // Both modes must outlast process startup: the write is only observable once
+    // the command has exited, and the tool returns as soon as its budget lapses.
+    let args = if mode == "one_shot" {
+        json!({"cmd":"printf x >> result", "timeout_ms":30_000})
     } else {
-        json!({"cmd":"printf x >> result", "yield_time_ms":1000})
+        json!({"cmd":"printf x >> result", "yield_time_ms":30_000})
     };
     for (id, decision, before, after) in [
         ("deny", ReviewDecision::denied("leave it alone"), "", ""),
@@ -125,8 +130,13 @@ async fn repeated_commands_wait_for_a_human_and_denial_has_no_side_effect(
             "xxx",
         ),
     ] {
-        let mock =
-            mount_function_call_agent_response(harness.server(), id, &args.to_string(), tool).await;
+        let mock = mount_function_call_agent_response(
+            harness.server(),
+            id,
+            &args.to_string(),
+            "exec_command",
+        )
+        .await;
         start(&harness).await?;
         let request = next_exec_approval(&harness).await;
         // The tool's output request and filesystem effect must both wait.
@@ -165,7 +175,7 @@ async fn repeated_commands_wait_for_a_human_and_denial_has_no_side_effect(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn patches_show_all_files_and_wait_again_after_session_approval() -> Result<()> {
     skip_if_no_network!(Ok(()));
-    let harness = harness("exec_command", AskForApproval::OnRequest).await?;
+    let harness = harness("session", AskForApproval::OnRequest).await?;
     for (id, decision) in [
         ("deny", ReviewDecision::denied("do not write")),
         ("allow", ReviewDecision::ApprovedForSession),
@@ -234,7 +244,7 @@ async fn patches_show_all_files_and_wait_again_after_session_approval() -> Resul
 async fn no_prompt_policy_refuses_execution_instead_of_auto_approving() -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX shell command");
     skip_if_no_network!(Ok(()));
-    let harness = harness("exec_command", AskForApproval::Never).await?;
+    let harness = harness("session", AskForApproval::Never).await?;
     let mock = mount_function_call_agent_response(
         harness.server(),
         "blocked",
@@ -258,7 +268,7 @@ async fn no_prompt_policy_refuses_execution_instead_of_auto_approving() -> Resul
 async fn interrupt_discards_a_pending_action_and_its_late_approval() -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX shell command");
     skip_if_no_network!(Ok(()));
-    let harness = harness("exec_command", AskForApproval::OnRequest).await?;
+    let harness = harness("session", AskForApproval::OnRequest).await?;
     let mock = mount_function_call_agent_response(
         harness.server(),
         "interrupted",
@@ -291,7 +301,7 @@ async fn interrupt_discards_a_pending_action_and_its_late_approval() -> Result<(
 async fn terminal_input_waits_even_without_the_stdin_approval_feature() -> Result<()> {
     skip_if_target_windows!(Ok(()), "uses a POSIX interactive shell");
     skip_if_no_network!(Ok(()));
-    let harness = harness("exec_command", AskForApproval::OnRequest).await?;
+    let harness = harness("session", AskForApproval::OnRequest).await?;
     let opened = mount_function_call_agent_response(
         harness.server(),
         "open",

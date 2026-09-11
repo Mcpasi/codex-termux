@@ -35,8 +35,20 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libcap-dev protobuf-compiler
+          # bubblewrap is the default Linux filesystem sandbox. Without it the
+          # launcher reports Unavailable and every approved command dies before
+          # it can write, so the just-in-time tests below never see their effect.
+          sudo apt-get install -y --no-install-recommends pkg-config libssl-dev libcap-dev protobuf-compiler bubblewrap
           rustup toolchain install 1.95.0 --profile minimal
+      - name: Enable unprivileged user namespaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          # bubblewrap needs them, and ubuntu-24.04 restricts them by default.
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          if sudo sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Install test runner
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
