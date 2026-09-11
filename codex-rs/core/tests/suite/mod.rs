@@ -92,6 +92,7 @@ mod injected_models_cache;
 mod interrupt_hooks;
 mod items;
 mod json_result;
+mod just_in_time_approvals;
 mod live_cli;
 mod mcp_auth_elicitation;
 mod mcp_auth_refresh;

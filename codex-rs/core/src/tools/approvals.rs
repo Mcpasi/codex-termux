@@ -16,6 +16,7 @@ use crate::mcp_tool_call::request_mcp_tool_user_approval;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
 use crate::tools::hook_names::HookToolName;
+use crate::tools::just_in_time;
 use crate::tools::runtimes::apply_patch::ApplyPatchApprovalKey;
 use crate::tools::runtimes::unified_exec::UnifiedExecApprovalKey;
 use crate::tools::sandboxing::ApprovalRequestReasons;
@@ -24,6 +25,7 @@ use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::with_cached_approval;
 use codex_analytics::GuardianApprovalRequestSource;
 use codex_config::types::AppToolApproval;
+use codex_features::Feature;
 use codex_hooks::PermissionRequestDecision;
 use codex_otel::ToolDecisionSource;
 use codex_protocol::approvals::ExecApprovalKind;
@@ -500,6 +502,14 @@ impl Session {
         // Stdin that exceeds current permissions needs a fresh sandbox approval.
         // Strict review of ordinary input follows the same routing as ordinary exec.
         let policy = ctx.review_context.turn().approval_policy();
+        let just_in_time = self.features().enabled(Feature::JustInTimeApprovals)
+            && action.requires_just_in_time_approval();
+        if just_in_time
+            && let Some(reason) =
+                prompt_is_rejected_by_policy(policy, /*prompt_is_rule*/ false)
+        {
+            return Err(ToolError::Rejected(reason.to_string()));
+        }
         if matches!(&action, ApprovalAction::WriteStdin { sandbox_permissions, .. }
             if sandbox_permissions.requests_sandbox_override())
             && !(ctx.strict_auto_review && matches!(policy, AskForApproval::Never))
@@ -519,8 +529,8 @@ impl Session {
         };
 
         // Approval precedence is:
-        // 1. Hooks
-        // 2. If StrictAutoReview || Guardian enabled, then Guardian. Else, user.
+        // Hook denials remain authoritative. Just-in-time actions always need a
+        // human; otherwise hook allows and the configured reviewer still apply.
         let resolution = match run_permission_request_hooks(
             self,
             ctx.review_context.turn(),
@@ -529,7 +539,7 @@ impl Session {
         )
         .await
         {
-            Some(PermissionRequestDecision::Allow) => ApprovalResolution {
+            Some(PermissionRequestDecision::Allow) if !just_in_time => ApprovalResolution {
                 decision: ReviewDecision::Approved,
                 source: ApprovalResolutionSource::Hook,
             },
@@ -537,7 +547,15 @@ impl Session {
                 decision: ReviewDecision::denied(message),
                 source: ApprovalResolutionSource::Hook,
             },
-            None => self.request_reviewer_approval(action, &ctx).await,
+            Some(PermissionRequestDecision::Allow) | None if just_in_time => ApprovalResolution {
+                decision: just_in_time::one_action_decision(
+                    self.request_user_approval(&action, &ctx).await,
+                ),
+                source: ApprovalResolutionSource::User,
+            },
+            Some(PermissionRequestDecision::Allow) | None => {
+                self.request_reviewer_approval(action, &ctx).await
+            }
         };
         // Network approvals record their final telemetry after validation and persistence.
         if !is_network_approval {
@@ -698,6 +716,8 @@ impl Session {
         action: &ApprovalAction,
         ctx: &ApprovalContext,
     ) -> ReviewDecision {
+        let just_in_time = self.features().enabled(Feature::JustInTimeApprovals)
+            && action.requires_just_in_time_approval();
         match action {
             ApprovalAction::ExecCommand {
                 environment_id,
@@ -706,6 +726,7 @@ impl Session {
                 additional_permissions,
                 justification,
                 proposed_execpolicy_amendment,
+                sandbox_permissions,
                 ..
             } => {
                 let cwd = match guardian_cwd(environment_id, cwd.clone()) {
@@ -723,6 +744,19 @@ impl Session {
                     .clone()
                     .or_else(|| ctx.approval_reason.clone())
                     .or_else(|| justification.clone());
+                let reason = if just_in_time && sandbox_permissions.requires_escalated_permissions()
+                {
+                    Some(format!(
+                        "{} This action requests execution outside the sandbox. {}",
+                        just_in_time::REASON,
+                        justification
+                            .as_ref()
+                            .or(reason.as_ref())
+                            .map_or("", String::as_str)
+                    ))
+                } else {
+                    reason
+                };
                 let policy_fingerprint = ctx
                     .review_context
                     .environments()
@@ -733,6 +767,7 @@ impl Session {
                 let cache_keys = action
                     .cache_keys()
                     .into_iter()
+                    .filter(|_| !just_in_time)
                     .map(|key| (key, &policy_fingerprint))
                     .collect();
                 with_cached_approval(&self.services, tool_name, cache_keys, || async {
@@ -746,9 +781,16 @@ impl Session {
                         cwd.into(),
                         reason,
                         ctx.network_approval_context.clone(),
-                        proposed_execpolicy_amendment.clone(),
+                        proposed_execpolicy_amendment
+                            .clone()
+                            .filter(|_| !just_in_time),
                         additional_permissions.clone(),
-                        /*available_decisions*/ None,
+                        just_in_time.then(|| {
+                            vec![
+                                ReviewDecision::Approved,
+                                ReviewDecision::denied("rejected by user"),
+                            ]
+                        }),
                         /*plugin_attribution_override*/ None,
                     )
                     .await
@@ -782,7 +824,14 @@ impl Session {
                     /*network_approval_context*/ None,
                     /*proposed_execpolicy_amendment*/ None,
                     additional_permissions.clone(),
-                    Some(vec![ReviewDecision::Approved, ReviewDecision::Abort]),
+                    Some(vec![
+                        ReviewDecision::Approved,
+                        if just_in_time {
+                            ReviewDecision::denied("rejected by user")
+                        } else {
+                            ReviewDecision::Abort
+                        },
+                    ]),
                     /*plugin_attribution_override*/ None,
                 )
                 .await
@@ -804,11 +853,18 @@ impl Session {
                     Some(environment_id.clone()),
                     command.clone(),
                     cwd.clone().into(),
-                    /*reason*/ None,
+                    just_in_time.then(|| just_in_time::REASON.to_string()),
                     /*network_approval_context*/ None,
                     /*proposed_execpolicy_amendment*/ None,
                     additional_permissions.clone(),
-                    Some(vec![ReviewDecision::Approved, ReviewDecision::Abort]),
+                    Some(vec![
+                        ReviewDecision::Approved,
+                        if just_in_time {
+                            ReviewDecision::denied("rejected by user")
+                        } else {
+                            ReviewDecision::Abort
+                        },
+                    ]),
                     /*plugin_attribution_override*/ None,
                 )
                 .await
@@ -821,7 +877,8 @@ impl Session {
                 let reason = ctx
                     .retry_reason
                     .clone()
-                    .or_else(|| ctx.approval_reason.clone());
+                    .or_else(|| ctx.approval_reason.clone())
+                    .or_else(|| just_in_time.then(|| just_in_time::REASON.to_string()));
                 if *permissions_preapproved && reason.is_none() {
                     return ReviewDecision::Approved;
                 }

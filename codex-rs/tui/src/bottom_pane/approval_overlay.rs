@@ -51,8 +51,10 @@ use codex_app_server_protocol::NetworkApprovalContext;
 use codex_app_server_protocol::NetworkApprovalProtocol;
 use codex_app_server_protocol::NetworkPolicyRuleAction;
 use codex_app_server_protocol::RequestId;
+use codex_features::Feature;
 use codex_features::Features;
 use codex_protocol::ThreadId;
+
 use codex_protocol::request_permissions::PermissionGrantScope;
 use codex_protocol::request_permissions::RequestPermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -68,6 +70,9 @@ use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
+
+#[path = "approval_overlay_just_in_time.rs"]
+mod just_in_time;
 
 /// Request coming from the agent that needs user approval.
 #[derive(Clone, Debug)]
@@ -247,11 +252,11 @@ impl ApprovalOverlay {
     fn build_options(
         request: &ApprovalRequest,
         header: Box<dyn Renderable>,
-        _features: &Features,
+        features: &Features,
         approval_keymap: &ApprovalKeymap,
         list_keymap: &ListKeymap,
     ) -> (Vec<ApprovalOption>, SelectionViewParams) {
-        let (options, title) = match request {
+        let (mut options, mut title) = match request {
             ApprovalRequest::Exec(request) => {
                 let title = if request.kind == CommandExecutionApprovalKind::WriteStdin {
                     request.command.get(2).map_or_else(
@@ -294,6 +299,13 @@ impl ApprovalOverlay {
                 format!("{} needs your approval.", request.server_name),
             ),
         };
+
+        if features.enabled(Feature::JustInTimeApprovals)
+            && let Some(jit_options) = just_in_time::approval_options(request, approval_keymap)
+        {
+            options = jit_options;
+            title = "Just-in-time permissions — the agent is paused. You decide.".to_string();
+        }
 
         let header = Box::new(ColumnRenderable::with([
             Line::from(title.bold()).into(),
@@ -2192,6 +2204,72 @@ mod tests {
         }
         assert!(rendered.contains("o to open thread"));
         assert!(!rendered.contains("$ apply_patch"));
+    }
+
+    #[test]
+    fn just_in_time_command_and_patch_dialogs_offer_only_one_action() {
+        let mut features = Features::with_defaults();
+        features.enable(Feature::JustInTimeApprovals);
+        let mut command = make_exec_request();
+        if let ApprovalRequest::Exec(request) = &mut command {
+            request.command = vec!["node".to_string(), "checks".to_string()];
+            request.reason = None;
+        }
+        let patch = ApprovalRequest::ApplyPatch(ApplyPatchApprovalRequest {
+            thread_id: ThreadId::new(),
+            thread_label: None,
+            id: "patch".to_string(),
+            reason: None,
+            cwd: absolute_path("/tmp"),
+            changes: HashMap::from([
+                (
+                    PathBuf::from("index.js"),
+                    FileChange::Add {
+                        content: "hello\n".to_string(),
+                    },
+                ),
+                (
+                    PathBuf::from("docs/notice.md"),
+                    FileChange::Add {
+                        content: "notice\n".to_string(),
+                    },
+                ),
+            ]),
+        });
+        for (name, request) in [
+            ("just_in_time_command", command),
+            ("just_in_time_patch", patch),
+        ] {
+            let (tx, mut rx) = unbounded_channel::<AppEvent>();
+            let mut view = make_overlay(request, AppEventSender::new(tx), features.clone());
+            let rendered = render_overlay_lines(&view, /*width*/ 100)
+                .replace(&absolute_path("/tmp").display().to_string(), "/tmp")
+                .replace('\\', "/");
+            assert_snapshot!(name, rendered.trim());
+            // The session shortcut must not resolve either request.
+            view.handle_key_event(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+            assert!(rx.try_recv().is_err());
+            view.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+            let event = std::iter::from_fn(|| rx.try_recv().ok())
+                .find(|event| matches!(event, AppEvent::SubmitThreadOp { .. }))
+                .expect("explicit denial");
+            assert!(matches!(
+                event,
+                AppEvent::SubmitThreadOp {
+                    op: Op::ExecApproval {
+                        decision: CommandExecutionApprovalDecision::Decline,
+                        ..
+                    },
+                    ..
+                } | AppEvent::SubmitThreadOp {
+                    op: Op::PatchApproval {
+                        decision: FileChangeApprovalDecision::Decline,
+                        ..
+                    },
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

@@ -62,13 +62,13 @@ What this fork does not do:
 - realtime voice/audio is no longer part of this build: upstream removed the TUI realtime voice feature (openai/codex#27801), so the fork's Android cpal/oboe enablement toggle (never usable from the Termux CLI anyway, as the backend needs an Android JavaVM/Activity) was dropped with it. Termux-native audio remains tracked on the Codex VL roadmap.
 - Android PTY and lock-handling compatibility patches remain enabled where upstream behavior still breaks on Bionic/Termux
 - the sandbox on Android is enforced with seccomp + ptrace instead of Landlock, so the filesystem boundary holds on devices whose kernel lacks the Landlock LSM (most of them) - see [docs/android_sandbox.md](./docs/android_sandbox.md)
+- optional just-in-time permissions pause each command, file edit and terminal input until you allow or deny it: start with `codex --enable just_in_time_approvals --ask-for-approval on-request`. Approvals apply once; the Android sandbox continues enforcing the selected profile. Embedded apps can use the same [app-server approval flow](./codex-rs/app-server/README.md#just-in-time-permissions).
 - anyone using a custom provider with an empty instruction value still receives the bundled instruction template: the symptom is that the provider works but behaves worse, not that it fails to start, because this fork checks instruction content while upstream checks only field presence
 
 ## Releases and Updates
 
 - Latest GitHub release: [releases/latest](https://github.com/DioNanos/codex-termux/releases/latest)
-- Upstream base: OpenAI Codex `rust-v0.153.2`, published as `0.153.3-agentcodi.1`
-  on the npm `latest` channel with a matching GitHub tag and release.
+- Upstream base: OpenAI Codex `rust-v0.153.2`; package version `0.153.3-agentcodi.2`.
 - npm package: [`@mmmbuto/codex-cli-termux`](https://www.npmjs.com/package/@mmmbuto/codex-cli-termux)
 - Legacy `@mmmbuto/codex-cli-lts` (OpenAI Codex 0.80.x) is archived; current builds live in this package or in [`@mmmbuto/codex-vl`](https://www.npmjs.com/package/@mmmbuto/codex-vl) (multi-platform).
 

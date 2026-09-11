@@ -144,6 +144,8 @@ pub enum Feature {
     ExecPermissionApprovals,
     /// Require approval before writing input to escalated unified-exec terminals.
     WriteStdinApproval,
+    /// Pause every exec, patch and terminal input for a fresh human decision.
+    JustInTimeApprovals,
     /// Expose the built-in request_permissions tool.
     RequestPermissionsTool,
     /// Allow the model to request web searches that fetch live content.
@@ -1139,6 +1141,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::WriteStdinApproval,
         key: "write_stdin_approval",
         stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::JustInTimeApprovals,
+        key: "just_in_time_approvals",
+        stage: Stage::Stable,
         default_enabled: false,
     },
     FeatureSpec {

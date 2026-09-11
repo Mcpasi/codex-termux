@@ -180,6 +180,15 @@ pub async fn exec_approval(
     decision: ReviewDecision,
 ) {
     let event_turn_id = turn_id.unwrap_or_else(|| approval_id.clone());
+    let decision = if sess
+        .features()
+        .enabled(codex_features::Feature::JustInTimeApprovals)
+        && matches!(decision, ReviewDecision::ApprovedExecpolicyAmendment { .. })
+    {
+        ReviewDecision::Approved
+    } else {
+        decision
+    };
     if let ReviewDecision::ApprovedExecpolicyAmendment {
         proposed_execpolicy_amendment,
     } = &decision

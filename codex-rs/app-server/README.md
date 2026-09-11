@@ -1940,6 +1940,37 @@ Certain actions (shell commands or modifying files) may require explicit user ap
 - Requests include `threadId` and `turnId`—use them to scope UI state to the active conversation.
 - Respond with a single `{ "decision": ... }` payload. Command approvals support `accept`, `acceptForSession`, `acceptWithExecpolicyAmendment`, `applyNetworkPolicyAmendment`, `decline`, or `cancel`. The server resumes or declines the work and ends the item with `item/completed`.
 
+### Just-in-time permissions
+
+AGENTCODI and other clients can enable one-action approvals with
+`codex --enable just_in_time_approvals app-server`, or in their configuration:
+
+```toml
+approval_policy = "on-request"
+
+[features]
+just_in_time_approvals = true
+```
+
+Use the existing `item/commandExecution/requestApproval` and
+`item/fileChange/requestApproval` requests to display the command/file preview
+with **Allow** (`accept`) and **Deny** (`decline`). Execution waits for the response;
+interrupting the turn cancels pending actions. Keep the flag enabled on resume;
+ordinary child-session configuration inherits it.
+
+Each command, patch and non-empty `write_stdin` needs a fresh human decision,
+despite rules, earlier grants, hook allows or automatic reviewers. Command requests
+advertise only one-action decisions; file-change clients should hide reusable
+choices too. Legacy session/rule responses become `accept` without persisting a
+grant. Hook denials and policy prohibitions remain effective; `never` or granular
+settings that disallow sandbox prompts cause these actions to be refused.
+
+Approval covers a complete command and its internal writes within the selected
+sandbox. It does not prompt per syscall, undo completed work, freeze running
+programs, or intercept MCP/external-app actions or direct user `command/exec`
+requests. Empty polls and non-TTY interrupts remain available. Sandbox retries
+need fresh approval; Android seccomp/ptrace still enforces the filesystem boundary.
+
 ### Command execution approvals
 
 Order of messages:

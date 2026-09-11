@@ -134,6 +134,10 @@ impl ToolOrchestrator {
     {
         let turn_ctx = tool_ctx.step_context.turn.as_ref();
         let approval_policy = tool_ctx.step_context.settings.approval_policy();
+        let just_in_time = tool_ctx
+            .session
+            .features()
+            .enabled(codex_features::Feature::JustInTimeApprovals);
         let otel = turn_ctx.session_telemetry.clone();
         let otel_tn = flat_tool_name(&tool_ctx.tool_name).into_owned();
         let otel_ci = &tool_ctx.call_id;
@@ -171,6 +175,11 @@ impl ToolOrchestrator {
         let requirement = tool.exec_approval_requirement(req).unwrap_or_else(|| {
             default_exec_approval_requirement(approval_policy, &file_system_sandbox_policy)
         });
+        let requirement = if just_in_time {
+            super::just_in_time::approval_requirement(approval_policy, requirement)
+        } else {
+            requirement
+        };
         match &requirement {
             ExecApprovalRequirement::Skip { .. } => {
                 if strict_auto_review {
@@ -416,7 +425,8 @@ impl ToolOrchestrator {
 
                 // Strict auto-review approval covers the sandboxed attempt only;
                 // retrying without the sandbox requires a fresh guardian review.
-                let bypass_retry_approval = !strict_auto_review
+                let bypass_retry_approval = !just_in_time
+                    && !strict_auto_review
                     && tool.should_bypass_approval(approval_policy, already_approved)
                     && network_approval_context.is_none();
                 if !bypass_retry_approval {

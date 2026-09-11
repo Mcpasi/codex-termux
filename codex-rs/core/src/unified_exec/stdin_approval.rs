@@ -182,12 +182,17 @@ impl ProcessEntry {
         input: &str,
         strict_auto_review: bool,
     ) -> Result<Option<(ApprovalAction, String)>, UnifiedExecError> {
+        let just_in_time = context
+            .session
+            .features()
+            .enabled(Feature::JustInTimeApprovals);
         if input.is_empty()
             || (!self.tty && input == "\u{3}")
-            || !context
-                .session
-                .features()
-                .enabled(Feature::WriteStdinApproval)
+            || (!just_in_time
+                && !context
+                    .session
+                    .features()
+                    .enabled(Feature::WriteStdinApproval))
         {
             return Ok(None);
         }
@@ -214,7 +219,10 @@ impl ProcessEntry {
         let sandbox_permissions = permissions
             .review_requirement(&current, environment.permission_profile())
             .map_err(approval_error)?;
-        if sandbox_permissions == SandboxPermissions::UseDefault && !strict_auto_review {
+        if sandbox_permissions == SandboxPermissions::UseDefault
+            && !strict_auto_review
+            && !just_in_time
+        {
             return Ok(None);
         }
         // Manual approvals shell-quote the input, which cannot preserve NUL bytes.

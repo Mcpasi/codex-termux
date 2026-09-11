@@ -1,0 +1,14 @@
+---
+source: tui/src/bottom_pane/approval_overlay.rs
+expression: rendered.trim()
+---
+Just-in-time permissions — the agent is paused. You decide.
+
+  Description: Apply proposed file edits
+  Destination: /tmp/docs/notice.md
+  Destination: /tmp/index.js
+
+› 1. Allow (y)
+  2. Deny (d)
+
+  Press enter to confirm or esc to cancel

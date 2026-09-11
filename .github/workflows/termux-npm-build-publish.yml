@@ -14,15 +14,17 @@ on:
 
 jobs:
   sandbox-regressions:
-    name: Android sandbox syscall regressions
+    name: Android sandbox and just-in-time permission regressions
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
       RUSTUP_TOOLCHAIN: "1.95.0"
       RUST_MIN_STACK: "8388608"
       CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -46,6 +48,13 @@ jobs:
           # These Linux-host tests install real inherited seccomp TRAP/KILL
           # rules. A cross-compiled Android ELF alone cannot exercise them.
           just test -p codex-linux-sandbox --lib --no-tests=fail -E 'test(android_sandbox::)'
+
+      - name: Verify just-in-time approval behavior and dialogs
+        shell: bash
+        run: |
+          set -euo pipefail
+          just test -p codex-core --lib --test all --no-tests=fail -E 'test(just_in_time)'
+          just test -p codex-tui --lib --no-tests=fail -E 'test(just_in_time)'
 
   build-android-arm64:
     name: Build Android ARM64

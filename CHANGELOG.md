@@ -1,3 +1,16 @@
+# [0.153.3-agentcodi.2] - 2026-09-10
+
+## Just-in-time permissions
+
+- Added the opt-in `just_in_time_approvals` feature for Android sandbox workflows
+  and app-server clients, including AGENTCODI. Every agent command, patch and
+  non-empty terminal input waits for Allow/Deny before execution.
+- Rules, earlier grants, hook allows and automatic reviewers cannot skip the next
+  human decision. Hook denials and policy prohibitions remain effective.
+- Existing approval RPCs remain compatible; legacy session/rule grants apply once.
+  Empty terminal polls do not prompt; cancellation stops the pending action.
+- Added integration tests and UI snapshots to the GitHub Actions regression job.
+
 # [0.153.3-agentcodi.1] - 2026-09-10
 
 ## Android sandbox backend

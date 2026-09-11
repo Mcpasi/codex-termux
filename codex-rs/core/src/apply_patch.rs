@@ -35,7 +35,11 @@ pub(crate) fn prepare_apply_patch(
     ) {
         SafetyCheck::AutoApprove => Ok(ApplyPatchRuntimeInvocation {
             action,
-            auto_approved: true,
+            auto_approved: !step_context
+                .turn
+                .config
+                .features
+                .enabled(codex_features::Feature::JustInTimeApprovals),
             exec_approval_requirement: ExecApprovalRequirement::Skip {
                 bypass_sandbox: false,
                 proposed_execpolicy_amendment: None,
