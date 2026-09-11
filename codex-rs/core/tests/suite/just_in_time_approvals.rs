@@ -24,8 +24,6 @@ use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_target_windows;
 use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::test_codex;
-use core_test_support::wait_for_event;
-use core_test_support::wait_for_event_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::HashMap;
@@ -73,17 +71,83 @@ async fn start(harness: &TestCodexHarness) -> Result<()> {
 }
 
 async fn next_exec_approval(harness: &TestCodexHarness) -> ExecApprovalRequestEvent {
-    wait_for_event_match(&harness.test().codex, |event| match event {
-        EventMsg::ExecApprovalRequest(request) => Some(request.clone()),
-        _ => None,
-    })
-    .await
+    match next_approval(harness).await {
+        EventMsg::ExecApprovalRequest(request) => request,
+        event => panic!("expected command approval, got {event:?}"),
+    }
+}
+
+async fn next_approval(harness: &TestCodexHarness) -> EventMsg {
+    loop {
+        match next_event(harness).await {
+            event @ (EventMsg::ExecApprovalRequest(_) | EventMsg::ApplyPatchApprovalRequest(_)) => {
+                return event;
+            }
+            event @ (EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) => {
+                panic!("turn ended before the expected approval: {event:?}");
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn next_event(harness: &TestCodexHarness) -> EventMsg {
+    // Let the runner own cancellation; host startup speed is not a test deadline.
+    let event = harness
+        .test()
+        .codex
+        .next_event()
+        .await
+        .expect("event stream ended")
+        .msg;
+    if let EventMsg::Error(error) = &event {
+        panic!("unexpected session error: {error:?}");
+    }
+    event
+}
+
+enum Completion<'a> {
+    Turn,
+    Command(&'a str),
+    Interrupted,
+}
+
+async fn finish_turn(harness: &TestCodexHarness, expected: Completion<'_>) {
+    let mut command_finished = !matches!(expected, Completion::Command(_));
+    let mut turn_finished = false;
+    loop {
+        match next_event(harness).await {
+            EventMsg::ExecCommandEnd(end) if matches!(expected, Completion::Command(id) if end.call_id == id) =>
+            {
+                assert_eq!(end.exit_code, 0, "command failed: {end:?}");
+                command_finished = true;
+            }
+            EventMsg::TurnComplete(_) => {
+                assert!(
+                    !matches!(expected, Completion::Interrupted),
+                    "expected interruption"
+                );
+                turn_finished = true;
+            }
+            EventMsg::TurnAborted(_) if matches!(expected, Completion::Interrupted) => return,
+            event @ (EventMsg::TurnAborted(_)
+            | EventMsg::ExecApprovalRequest(_)
+            | EventMsg::ApplyPatchApprovalRequest(_)) => {
+                panic!("unexpected event while waiting for completion: {event:?}");
+            }
+            _ => {}
+        }
+        if turn_finished && command_finished {
+            return;
+        }
+    }
 }
 
 async fn decide_and_finish(
     harness: &TestCodexHarness,
     request: ExecApprovalRequestEvent,
     decision: ReviewDecision,
+    completion: Completion<'_>,
 ) -> Result<()> {
     let codex = &harness.test().codex;
     codex
@@ -93,7 +157,7 @@ async fn decide_and_finish(
             decision,
         })
         .await?;
-    wait_for_event(codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+    finish_turn(harness, completion).await;
     Ok(())
 }
 
@@ -108,13 +172,7 @@ async fn repeated_commands_wait_for_a_human_and_denial_has_no_side_effect(
     let harness = harness(mode, AskForApproval::OnRequest).await?;
     let rules_path = harness.test().codex_home_path().join("rules/default.rules");
     let original_rules = std::fs::read_to_string(&rules_path)?;
-    // Both modes must outlast process startup: the write is only observable once
-    // the command has exited, and the tool returns as soon as its budget lapses.
-    let args = if mode == "one_shot" {
-        json!({"cmd":"printf x >> result", "timeout_ms":30_000})
-    } else {
-        json!({"cmd":"printf x >> result", "yield_time_ms":30_000})
-    };
+    let args = json!({"cmd":"printf x >> result"});
     for (id, decision, before, after) in [
         ("deny", ReviewDecision::denied("leave it alone"), "", ""),
         ("allow", ReviewDecision::ApprovedForSession, "", "x"),
@@ -155,7 +213,14 @@ async fn repeated_commands_wait_for_a_human_and_denial_has_no_side_effect(
             ])
         );
         assert_eq!(request.proposed_execpolicy_amendment, None);
-        decide_and_finish(&harness, request, decision).await?;
+        // A yielded command can finish after the model turn. Observe the real
+        // process-exit event before checking its writes, regardless of ordering.
+        let completion = if id == "deny" {
+            Completion::Turn
+        } else {
+            Completion::Command(id)
+        };
+        decide_and_finish(&harness, request, decision, completion).await?;
         let contents = if harness.path_exists("result").await? {
             harness.read_file_text("result").await?
         } else {
@@ -192,11 +257,10 @@ async fn patches_show_all_files_and_wait_again_after_session_approval() -> Resul
         .await;
         let completion = mount_sse_once(harness.server(), sse(vec![ev_completed("done")])).await;
         start(&harness).await?;
-        let request = wait_for_event_match(&harness.test().codex, |event| match event {
-            EventMsg::ApplyPatchApprovalRequest(request) => Some(request.clone()),
-            _ => None,
-        })
-        .await;
+        let request = match next_approval(&harness).await {
+            EventMsg::ApplyPatchApprovalRequest(request) => request,
+            event => panic!("expected patch approval, got {event:?}"),
+        };
         assert_eq!(
             request.changes,
             HashMap::from([
@@ -228,10 +292,7 @@ async fn patches_show_all_files_and_wait_again_after_session_approval() -> Resul
                 decision,
             })
             .await?;
-        wait_for_event(&harness.test().codex, |event| {
-            matches!(event, EventMsg::TurnComplete(_))
-        })
-        .await;
+        finish_turn(&harness, Completion::Turn).await;
         assert_eq!(mock.requests().len(), 1);
         assert_eq!(completion.requests().len(), 1);
     }
@@ -252,7 +313,8 @@ async fn no_prompt_policy_refuses_execution_instead_of_auto_approving() -> Resul
         "exec_command",
     )
     .await;
-    harness.test().submit_text_turn("write a file").await?;
+    start(&harness).await?;
+    finish_turn(&harness, Completion::Turn).await;
     assert!(!harness.path_exists("result").await?);
     assert!(
         mock.completion
@@ -279,10 +341,7 @@ async fn interrupt_discards_a_pending_action_and_its_late_approval() -> Result<(
     start(&harness).await?;
     let request = next_exec_approval(&harness).await;
     harness.test().codex.submit(Op::Interrupt).await?;
-    wait_for_event(&harness.test().codex, |event| {
-        matches!(event, EventMsg::TurnAborted(_))
-    })
-    .await;
+    finish_turn(&harness, Completion::Interrupted).await;
     harness
         .test()
         .codex
@@ -311,7 +370,13 @@ async fn terminal_input_waits_even_without_the_stdin_approval_feature() -> Resul
     .await;
     start(&harness).await?;
     let request = next_exec_approval(&harness).await;
-    decide_and_finish(&harness, request, ReviewDecision::Approved).await?;
+    decide_and_finish(
+        &harness,
+        request,
+        ReviewDecision::Approved,
+        Completion::Turn,
+    )
+    .await?;
     assert!(
         opened
             .completion
@@ -327,7 +392,8 @@ async fn terminal_input_waits_even_without_the_stdin_approval_feature() -> Resul
         "write_stdin",
     )
     .await;
-    harness.test().submit_text_turn("poll output").await?;
+    start(&harness).await?;
+    finish_turn(&harness, Completion::Turn).await;
     assert_eq!(poll.completion.requests().len(), 1);
     let input = mount_function_call_agent_response(
         harness.server(),
@@ -343,7 +409,13 @@ async fn terminal_input_waits_even_without_the_stdin_approval_feature() -> Resul
         codex_protocol::approvals::ExecApprovalKind::WriteStdin
     );
     assert!(!harness.path_exists("result").await?);
-    decide_and_finish(&harness, request, ReviewDecision::denied("blocked input")).await?;
+    decide_and_finish(
+        &harness,
+        request,
+        ReviewDecision::denied("blocked input"),
+        Completion::Turn,
+    )
+    .await?;
     assert!(!harness.path_exists("result").await?);
     assert!(
         input
