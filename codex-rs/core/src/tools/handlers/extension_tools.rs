@@ -17,6 +17,7 @@ use codex_tools::TurnItemEmissionFuture;
 use codex_tools::TurnItemEmitter;
 use codex_utils_string::to_ascii_json_string;
 
+use crate::function_tool::FunctionCallError;
 use crate::sandboxing::SandboxPermissions;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -65,7 +66,7 @@ impl ToolExecutor<ToolInvocation> for ExtensionToolAdapter {
     where
         ToolInvocation: 'a,
     {
-        Box::pin(async move { self.0.handle(to_extension_call(&invocation).await).await })
+        Box::pin(async move { self.0.handle(to_extension_call(&invocation).await?).await })
     }
 }
 
@@ -163,7 +164,9 @@ impl TurnItemEmitter for CoreTurnItemEmitter {
     }
 }
 
-async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall<'_> {
+async fn to_extension_call(
+    invocation: &ToolInvocation,
+) -> Result<ExtensionToolCall<'_>, FunctionCallError> {
     let conversation_history =
         ConversationHistory::new(invocation.session.clone_history().await.into_raw_items());
     let codex_turn_metadata = invocation
@@ -190,6 +193,7 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall<'_>
             /*additional_permissions*/ None,
         )
         .await
+        .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?
         .additional_permissions;
         let file_system_sandbox_context = environment.sandbox_context(additional_permissions);
         environments.push(ToolEnvironment {
@@ -200,7 +204,7 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall<'_>
             file_system_sandbox_context,
         });
     }
-    ExtensionToolCall {
+    Ok(ExtensionToolCall {
         turn_id: invocation.turn.sub_id.clone(),
         call_id: invocation.call_id.clone(),
         tool_name: invocation.tool_name.clone(),
@@ -215,7 +219,7 @@ async fn to_extension_call(invocation: &ToolInvocation) -> ExtensionToolCall<'_>
         }),
         environments,
         payload: invocation.payload.clone(),
-    }
+    })
 }
 
 #[cfg(test)]

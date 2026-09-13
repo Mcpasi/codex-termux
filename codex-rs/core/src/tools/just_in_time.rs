@@ -7,17 +7,22 @@ use super::sandboxing::ExecApprovalRequirement;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::exec_policy::prompt_is_rejected_by_policy;
+use crate::session::turn_context::TurnEnvironment;
+use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::ManagedFileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::PermissionProfileSnapshot;
 use codex_protocol::permissions::FileSystemAccessMode;
 use codex_protocol::permissions::FileSystemPath;
 use codex_protocol::permissions::FileSystemSandboxEntry;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::FileSystemSpecialPath;
+use codex_protocol::permissions::ReadDenyMatcher;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::ReviewDecision;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use futures::FutureExt;
 use std::io;
 
@@ -72,8 +77,8 @@ pub(crate) fn protect_codex_home(
             unreachable!("unrestricted managed permissions were materialized above");
         };
         // Deny both the configured spelling and the canonical target, including
-        // every descendant. Additional grants cannot remove these deny entries;
-        // they also make unsandboxed first attempts and retries ineligible.
+        // every descendant. The JIT grant validator prevents narrower grants
+        // from reopening them; these entries also forbid unsandboxed retries.
         for home in [codex_home, &canonical_home] {
             let denial =
                 FileSystemSandboxEntry::new(home.clone().into(), FileSystemAccessMode::Deny);
@@ -93,6 +98,72 @@ pub(crate) fn protect_codex_home(
         // just to source them inside an otherwise protected command.
         environment.shell_snapshot = futures::future::ready(None).boxed().shared();
         environment.shell_snapshot_v2_supported = false;
+    }
+    Ok(())
+}
+
+/// A platform sandbox may reopen a more specific grant beneath a denied root.
+/// Reject that authority before approval or execution, including stored grants.
+pub(crate) fn validate_additional_permissions(
+    environment: &TurnEnvironment,
+    cwd: &PathUri,
+    permissions: Option<&AdditionalPermissionProfile>,
+) -> io::Result<()> {
+    if environment.environment.is_remote() {
+        return Ok(());
+    }
+    let Some(file_system) = permissions.and_then(|permissions| permissions.file_system.as_ref())
+    else {
+        return Ok(());
+    };
+    let cwd = cwd.to_abs_path()?;
+    let policy = environment
+        .permission_profile_with_workspace_roots()
+        .file_system_sandbox_policy();
+    let Some(deny) = ReadDenyMatcher::new(&policy, &cwd) else {
+        return Ok(());
+    };
+    for entry in file_system
+        .entries
+        .iter()
+        .filter(|entry| entry.access.can_read())
+    {
+        // Resolve each grant separately so a broad parent grant cannot hide a
+        // second, more specific grant when the root list is deduplicated.
+        let grant = FileSystemSandboxPolicy::restricted(vec![entry.clone()])
+            .materialize_project_roots_with_path_uris(environment.workspace_roots());
+        if grant.has_full_disk_read_access() {
+            // A root-wide grant remains constrained by the existing deny roots.
+            continue;
+        }
+        let roots = grant.get_readable_roots_with_cwd(&cwd);
+        if roots.is_empty() {
+            return Err(io::Error::other(
+                "just-in-time permissions cannot resolve an additional permission safely",
+            ));
+        }
+        for root in roots {
+            // New paths still have an existing ancestor. Resolve that ancestor
+            // to catch both existing aliases and missing children below aliases.
+            let mut ancestor = root.as_path();
+            let canonical = loop {
+                match dunce::canonicalize(ancestor) {
+                    Ok(canonical) => {
+                        break canonical.join(root.strip_prefix(ancestor).expect("grant ancestor"));
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        ancestor = ancestor.parent().ok_or(error)?;
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+            if deny.is_read_denied_with_canonical_path(&root, &canonical) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "just-in-time permissions cannot grant access to protected paths",
+                ));
+            }
+        }
     }
     Ok(())
 }

@@ -270,13 +270,23 @@ pub(super) async fn apply_granted_turn_permissions(
     cwd: &PathUri,
     sandbox_permissions: SandboxPermissions,
     additional_permissions: Option<AdditionalPermissionProfile>,
-) -> EffectiveAdditionalPermissions {
+) -> std::io::Result<EffectiveAdditionalPermissions> {
     if matches!(sandbox_permissions, SandboxPermissions::RequireEscalated) {
-        return EffectiveAdditionalPermissions {
+        if session
+            .features()
+            .enabled(codex_features::Feature::JustInTimeApprovals)
+        {
+            super::just_in_time::validate_additional_permissions(
+                environment,
+                cwd,
+                additional_permissions.as_ref(),
+            )?;
+        }
+        return Ok(EffectiveAdditionalPermissions {
             sandbox_permissions,
             additional_permissions,
             permissions_preapproved: false,
-        };
+        });
     }
 
     let environment_id = &environment.selection.environment_id;
@@ -305,6 +315,16 @@ pub(super) async fn apply_granted_turn_permissions(
     // A preapproved command must execute with the stored authority, never an
     // unchecked merge that could reopen one of the grant's denied paths.
     let effective_permissions = preapproved_permissions.or(effective_permissions);
+    if session
+        .features()
+        .enabled(codex_features::Feature::JustInTimeApprovals)
+    {
+        super::just_in_time::validate_additional_permissions(
+            environment,
+            cwd,
+            effective_permissions.as_ref(),
+        )?;
+    }
 
     let sandbox_permissions =
         if effective_permissions.is_some() && !sandbox_permissions.uses_additional_permissions() {
@@ -313,11 +333,11 @@ pub(super) async fn apply_granted_turn_permissions(
             sandbox_permissions
         };
 
-    EffectiveAdditionalPermissions {
+    Ok(EffectiveAdditionalPermissions {
         sandbox_permissions,
         additional_permissions: effective_permissions,
         permissions_preapproved,
-    }
+    })
 }
 
 fn preapproved_permission_profile(

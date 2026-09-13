@@ -113,6 +113,7 @@ async fn next_event(harness: &TestCodexHarness) -> EventMsg {
 enum Completion<'a> {
     Turn,
     Command(&'a str),
+    NoCommand,
     Interrupted,
 }
 
@@ -121,6 +122,11 @@ async fn finish_turn(harness: &TestCodexHarness, expected: Completion<'_>) {
     let mut turn_finished = false;
     loop {
         match next_event(harness).await {
+            event @ (EventMsg::ExecCommandBegin(_) | EventMsg::ExecCommandEnd(_))
+                if matches!(expected, Completion::NoCommand) =>
+            {
+                panic!("rejected permissions started a command: {event:?}");
+            }
             EventMsg::ExecCommandEnd(end) if matches!(expected, Completion::Command(id) if end.call_id == id) =>
             {
                 assert_eq!(end.exit_code, 0, "command failed: {end:?}");
@@ -259,7 +265,8 @@ async fn approved_commands_keep_codex_home_inaccessible(
     // or alter the runtime's authentication file, even in this test harness.
     let private_file = home.join("jit-private-canary");
     std::fs::write(&private_file, "private test data\n")?;
-    std::os::unix::fs::symlink(home, harness.path("home-link"))?;
+    let home_link = harness.path("home-link");
+    std::os::unix::fs::symlink(home, &home_link)?;
     let outside = tempfile::tempdir()?;
     let allowed_file = outside.path().join("jit-public-canary");
     std::fs::write(&allowed_file, "public test data\n")?;
@@ -282,14 +289,33 @@ async fn approved_commands_keep_codex_home_inaccessible(
             "with_additional_permissions",
             Some(private_file.as_path()),
         ),
+        (
+            "mixed-grant",
+            "with_additional_permissions",
+            Some(private_file.as_path()),
+        ),
+        (
+            "alias-grant",
+            "with_additional_permissions",
+            Some(home_link.as_path()),
+        ),
+        (
+            "outside-grant",
+            "with_additional_permissions",
+            Some(outside.path()),
+        ),
     ] {
         let mut args = json!({"cmd": command, "sandbox_permissions": permissions});
         if permissions == "require_escalated" {
             args["justification"] = json!("Read the private test directory for this action");
         }
         if let Some(grant) = grants {
+            let mut paths = vec![grant];
+            if id == "mixed-grant" {
+                paths.push(home.parent().expect("home parent"));
+            }
             args["additional_permissions"] = json!({"file_system": {
-                "read": [grant], "write": [grant]
+                "read": paths, "write": paths
             }});
         }
         let mock = mount_function_call_agent_response(
@@ -300,6 +326,34 @@ async fn approved_commands_keep_codex_home_inaccessible(
         )
         .await;
         start(&harness).await?;
+        let rejection = if grants
+            .is_some_and(|grant| grant.starts_with(home) || grant == home_link.as_path())
+        {
+            Some("just-in-time permissions cannot grant access to protected paths")
+        } else if grants.is_some() && policy == AskForApproval::UnlessTrusted {
+            Some("cannot request additional permissions unless the approval policy is OnRequest")
+        } else {
+            None
+        };
+        if let Some(reason) = rejection {
+            // Policy rejections happen before a dialog or process. In particular,
+            // UnlessTrusted does not accept fresh with_additional_permissions.
+            finish_turn(&harness, Completion::NoCommand).await;
+            let output = mock
+                .completion
+                .single_request()
+                .function_call_output(id)
+                .to_string();
+            assert!(
+                output.contains(reason),
+                "wrong rejection for {id}: {output}"
+            );
+            assert!(
+                !output.contains("private test data"),
+                "rejection exposed the canary: {output}"
+            );
+            continue;
+        }
         let request = next_exec_approval(&harness).await;
         decide_and_finish(
             &harness,

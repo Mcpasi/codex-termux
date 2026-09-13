@@ -314,14 +314,21 @@ impl ExecCommandHandler {
                 "selected environment sandbox context is missing cwd".to_string(),
             ));
         };
-        let effective_additional_permissions = apply_granted_turn_permissions(
+        let effective_additional_permissions = match apply_granted_turn_permissions(
             context.session.as_ref(),
             turn_environment,
             &cwd,
             sandbox_permissions,
             additional_permissions,
         )
-        .await;
+        .await
+        {
+            Ok(permissions) => permissions,
+            Err(error) => {
+                manager.release_process_id(process_id).await;
+                return Err(FunctionCallError::RespondToModel(error.to_string()));
+            }
+        };
         let additional_permissions_allowed = exec_permission_approvals_enabled
             || (session.features().enabled(Feature::RequestPermissionsTool)
                 && effective_additional_permissions.permissions_preapproved);

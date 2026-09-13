@@ -319,7 +319,7 @@ async fn effective_patch_permissions(
         crate::sandboxing::SandboxPermissions::UseDefault,
         write_permissions_for_paths(&native_file_paths, &file_system_sandbox_policy, &native_cwd),
     )
-    .await;
+    .await?;
 
     Ok((
         file_paths,
@@ -563,9 +563,26 @@ async fn execute_verified_patch(
     tool_ctx: ToolCtx,
 ) -> Result<String, FunctionCallError> {
     let (file_paths, effective_additional_permissions, file_system_sandbox_policy) =
-        effective_patch_permissions(tool_ctx.session.as_ref(), &turn_environment, &action, cwd)
-            .await
-            .unwrap_or_else(|_| patch_permissions_without_path_matching(&action));
+        match effective_patch_permissions(
+            tool_ctx.session.as_ref(),
+            &turn_environment,
+            &action,
+            cwd,
+        )
+        .await
+        {
+            Ok(permissions) => permissions,
+            Err(error)
+                if tool_ctx
+                    .session
+                    .features()
+                    .enabled(codex_features::Feature::JustInTimeApprovals)
+                    && !turn_environment.environment.is_remote() =>
+            {
+                return Err(FunctionCallError::RespondToModel(error.to_string()));
+            }
+            Err(_) => patch_permissions_without_path_matching(&action),
+        };
     let apply = apply_patch::prepare_apply_patch(
         &tool_ctx.step_context,
         &turn_environment,

@@ -1975,8 +1975,13 @@ For local tools, JIT adds a mandatory deny for the configured and canonical
 inspection or command execution. One-action approvals, `require_escalated`,
 additional path grants and retries cannot remove that deny or bypass the
 filesystem sandbox. Other paths remain governed by the selected profile and
-sandboxed additional grants. Shell snapshots stored in the private home are
-disabled for these tools; runtime authentication and thread storage keep their
+sandboxed additional grants. Fresh and stored additional grants that target a
+protected path, including symlink aliases and missing descendants, are rejected
+before approval or process startup. A broader parent grant cannot conceal a
+second grant for a protected child. Fresh `with_additional_permissions` requests
+still require `OnRequest`; `UnlessTrusted` rejects them without an approval
+dialog. Shell snapshots stored in the private home are disabled for these tools;
+runtime authentication and thread storage keep their
 own access. JIT refuses local disabled/external sandbox profiles (including
 `:danger-full-access`) and an unresolvable `CODEX_HOME`. Remote executors retain
 their own filesystem policy; the controller's native home path is not sent to

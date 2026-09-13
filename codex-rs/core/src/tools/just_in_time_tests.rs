@@ -57,8 +57,8 @@ fn local_environments(
     }
 }
 
-#[test]
-fn codex_home_denial_survives_grants_and_disables_unsandboxed_attempts() {
+#[tokio::test]
+async fn codex_home_denial_survives_grants_and_disables_unsandboxed_attempts() {
     let temp = tempfile::tempdir().expect("temp dir");
     let root = AbsolutePathBuf::from_absolute_path(temp.path())
         .expect("absolute root")
@@ -99,6 +99,16 @@ fn codex_home_denial_survives_grants_and_disables_unsandboxed_attempts() {
             )),
             ..Default::default()
         };
+        let validation =
+            validate_additional_permissions(environment, environment.cwd(), Some(&additional));
+        if grant == &root {
+            validation.expect("broader grants retain the home denial");
+        } else {
+            assert_eq!(
+                validation.expect_err("protected grant rejected").kind(),
+                io::ErrorKind::PermissionDenied,
+            );
+        }
         let policy =
             effective_permission_profile(environment.permission_profile(), Some(&additional))
                 .file_system_sandbox_policy();
@@ -128,8 +138,8 @@ fn codex_home_denial_survives_grants_and_disables_unsandboxed_attempts() {
     }
 }
 
-#[test]
-fn managed_full_access_keeps_home_denied_and_other_paths_writable() {
+#[tokio::test]
+async fn managed_full_access_keeps_home_denied_and_other_paths_writable() {
     let temp = tempfile::tempdir().expect("temp dir");
     let home = AbsolutePathBuf::from_absolute_path(temp.path()).expect("absolute home");
     let mut environments = local_environments(
@@ -156,8 +166,8 @@ fn managed_full_access_keeps_home_denied_and_other_paths_writable() {
     assert!(policy.can_write_path_with_cwd(&home.parent().expect("parent").join("outside"), &home));
 }
 
-#[test]
-fn unresolvable_home_and_unmanaged_profiles_fail_closed() {
+#[tokio::test]
+async fn unresolvable_home_and_unmanaged_profiles_fail_closed() {
     let temp = tempfile::tempdir().expect("temp dir");
     let home = AbsolutePathBuf::from_absolute_path(temp.path()).expect("absolute home");
     for permissions in [
@@ -181,8 +191,8 @@ fn unresolvable_home_and_unmanaged_profiles_fail_closed() {
 }
 
 #[cfg(unix)]
-#[test]
-fn home_symlink_protects_both_spellings_and_workspace_aliases() {
+#[tokio::test]
+async fn home_symlink_protects_both_spellings_and_workspace_aliases() {
     let temp = tempfile::tempdir().expect("temp dir");
     let root = AbsolutePathBuf::from_absolute_path(temp.path()).expect("absolute root");
     let home = root.join("private-home");
@@ -213,6 +223,26 @@ fn home_symlink_protects_both_spellings_and_workspace_aliases() {
         &workspace_alias.join("auth.json"),
         &resolved.join("auth.json"),
     ));
+    let environment = environments.primary().expect("local environment");
+    for grant in [
+        workspace_alias,
+        alias.join("auth.json"),
+        home.join("new-directory/new-file"),
+    ] {
+        let additional = AdditionalPermissionProfile {
+            file_system: Some(FileSystemPermissions::from_read_write_roots(
+                Some(vec![root.clone(), grant.clone()]),
+                Some(vec![root.clone(), grant]),
+            )),
+            ..Default::default()
+        };
+        assert_eq!(
+            validate_additional_permissions(environment, environment.cwd(), Some(&additional))
+                .expect_err("parent grants cannot hide protected aliases or missing descendants")
+                .kind(),
+            io::ErrorKind::PermissionDenied,
+        );
+    }
 }
 
 #[test]
