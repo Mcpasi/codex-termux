@@ -3537,7 +3537,10 @@ impl Session {
         );
         let session_telemetry = settings.telemetry(&turn_context.session_telemetry);
         // Keep selections fixed for the turn while allowing their startup work to finish.
-        let environments = turn_context.environments.refresh_readiness();
+        let mut environments = turn_context.environments.refresh_readiness();
+        if self.features.enabled(Feature::JustInTimeApprovals) {
+            crate::tools::protect_codex_home(&mut environments, &turn_context.config.codex_home)?;
+        }
         self.services
             .agents_md_manager
             .refresh(&turn_context.config, &environments)

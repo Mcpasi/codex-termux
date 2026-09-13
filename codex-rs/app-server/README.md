@@ -1968,8 +1968,19 @@ settings that disallow sandbox prompts cause these actions to be refused.
 Approval covers a complete command and its internal writes within the selected
 sandbox. It does not prompt per syscall, undo completed work, freeze running
 programs, or intercept MCP/external-app actions or direct user `command/exec`
-requests. Empty polls and non-TTY interrupts remain available. Sandbox retries
-need fresh approval; Android seccomp/ptrace still enforces the filesystem boundary.
+requests. Empty polls and non-TTY interrupts remain available.
+
+For local tools, JIT adds a mandatory deny for the configured and canonical
+`CODEX_HOME` directory and all descendants, including `auth.json`, before file
+inspection or command execution. One-action approvals, `require_escalated`,
+additional path grants and retries cannot remove that deny or bypass the
+filesystem sandbox. Other paths remain governed by the selected profile and
+sandboxed additional grants. Shell snapshots stored in the private home are
+disabled for these tools; runtime authentication and thread storage keep their
+own access. JIT refuses local disabled/external sandbox profiles (including
+`:danger-full-access`) and an unresolvable `CODEX_HOME`. Remote executors retain
+their own filesystem policy; the controller's native home path is not sent to
+them. Network retries still need fresh approval and preserve filesystem denies.
 
 ### Command execution approvals
 

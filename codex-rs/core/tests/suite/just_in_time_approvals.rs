@@ -1,6 +1,7 @@
 //! Behavioral coverage: pause before side effects, deny without writing,
 //! approve repeated commands/patches afresh, and reject incompatible no-prompt
-//! policies. Uses the same approval events consumed by app-server clients.
+//! policies. Approved commands cannot bypass CODEX_HOME protection. Uses the
+//! same approval events consumed by app-server clients.
 
 use anyhow::Result;
 use codex_config::types::ApprovalsReviewer;
@@ -21,6 +22,8 @@ use core_test_support::responses::mount_function_call_agent_response;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::sse;
 use core_test_support::skip_if_no_network;
+#[cfg(unix)]
+use core_test_support::skip_if_remote;
 use core_test_support::skip_if_target_windows;
 use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::test_codex;
@@ -35,6 +38,7 @@ use test_case::test_case;
 async fn harness(mode: &'static str, policy: AskForApproval) -> Result<TestCodexHarness> {
     TestCodexHarness::with_auto_env_builder(test_codex().with_config(move |config| {
         config.features.enable(Feature::JustInTimeApprovals).expect("enable just-in-time approvals");
+        config.features.enable(Feature::ExecPermissionApprovals).expect("enable sandboxed permission requests");
         config.features.disable(Feature::WriteStdinApproval).expect("disable ordinary stdin reviews");
         if mode == "one_shot" {
             config.features.disable(Feature::UnifiedExec).expect("use one-shot exec_command");
@@ -234,6 +238,170 @@ async fn repeated_commands_wait_for_a_human_and_denial_has_no_side_effect(
         }
     }
     assert_eq!(std::fs::read_to_string(rules_path)?, original_rules);
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test_case("one_shot", AskForApproval::OnRequest)]
+#[test_case("session", AskForApproval::OnRequest)]
+#[test_case("one_shot", AskForApproval::UnlessTrusted)]
+#[test_case("session", AskForApproval::UnlessTrusted)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn approved_commands_keep_codex_home_inaccessible(
+    mode: &'static str,
+    policy: AskForApproval,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_remote!(Ok(()), "protects the controller's local CODEX_HOME");
+    let harness = harness(mode, policy).await?;
+    let home = harness.test().codex_home_path();
+    // A harmless canary exercises the entire private directory. Never inspect
+    // or alter the runtime's authentication file, even in this test harness.
+    let private_file = home.join("jit-private-canary");
+    std::fs::write(&private_file, "private test data\n")?;
+    std::os::unix::fs::symlink(home, harness.path("home-link"))?;
+    let outside = tempfile::tempdir()?;
+    let allowed_file = outside.path().join("jit-public-canary");
+    std::fs::write(&allowed_file, "public test data\n")?;
+    let private_path = shlex::try_quote(private_file.to_str().expect("UTF-8 test path"))?;
+    let allowed_path = shlex::try_quote(allowed_file.to_str().expect("UTF-8 test path"))?;
+    let command = format!(
+        "for path in {private_path} home-link/jit-private-canary; do \
+         if IFS= read -r value < \"$path\"; then printf 'HOME_READABLE\\n'; \
+         else printf 'HOME_BLOCKED\\n'; fi; done; \
+         if IFS= read -r value < {allowed_path}; then printf 'OUTSIDE_READABLE\\n'; fi; \
+         printf done > result"
+    );
+    for (id, permissions, grants) in [
+        ("default", "use_default", None),
+        ("escalated", "require_escalated", None),
+        ("parent-grant", "with_additional_permissions", home.parent()),
+        ("home-grant", "with_additional_permissions", Some(home)),
+        (
+            "file-grant",
+            "with_additional_permissions",
+            Some(private_file.as_path()),
+        ),
+    ] {
+        let mut args = json!({"cmd": command, "sandbox_permissions": permissions});
+        if permissions == "require_escalated" {
+            args["justification"] = json!("Read the private test directory for this action");
+        }
+        if let Some(grant) = grants {
+            args["additional_permissions"] = json!({"file_system": {
+                "read": [grant], "write": [grant]
+            }});
+        }
+        let mock = mount_function_call_agent_response(
+            harness.server(),
+            id,
+            &args.to_string(),
+            "exec_command",
+        )
+        .await;
+        start(&harness).await?;
+        let request = next_exec_approval(&harness).await;
+        decide_and_finish(
+            &harness,
+            request,
+            ReviewDecision::Approved,
+            Completion::Command(id),
+        )
+        .await?;
+        let output = mock
+            .completion
+            .single_request()
+            .function_call_output(id)
+            .to_string();
+        assert!(
+            output.contains("HOME_BLOCKED"),
+            "private read did not run: {output}"
+        );
+        assert!(
+            !output.contains("HOME_READABLE"),
+            "approval bypassed the home denial: {output}"
+        );
+        assert!(
+            output.contains("OUTSIDE_READABLE"),
+            "ordinary outside reads must still work: {output}"
+        );
+        assert_eq!(harness.read_file_text("result").await?, "done");
+    }
+    // Leave a real denial as the exit status: UnlessTrusted would previously
+    // offer an unsandboxed retry after this first approved attempt.
+    let mock = mount_function_call_agent_response(
+        harness.server(),
+        "denied-read",
+        &json!({"cmd": format!("cat {private_path}")}).to_string(),
+        "exec_command",
+    )
+    .await;
+    start(&harness).await?;
+    let request = next_exec_approval(&harness).await;
+    decide_and_finish(
+        &harness,
+        request,
+        ReviewDecision::Approved,
+        Completion::Turn,
+    )
+    .await?;
+    let output = mock
+        .completion
+        .single_request()
+        .function_call_output("denied-read")
+        .to_string();
+    // An early sandbox denial can return before ExecCommandEnd is emitted.
+    // Require a terminal failure in the tool result, never a yielded session.
+    assert!(
+        output.contains("Process exited with code 1"),
+        "expected a completed denied read: {output}"
+    );
+    assert!(
+        !output.contains("private test data"),
+        "retry exposed the private canary: {output}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&private_file)?,
+        "private test data\n"
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn patch_verification_cannot_read_codex_home_before_approval() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    skip_if_remote!(Ok(()), "protects the controller's local CODEX_HOME");
+    let harness = harness("session", AskForApproval::OnRequest).await?;
+    let private_file = harness.test().codex_home_path().join("jit-patch-canary");
+    let contents = "private patch test data\n";
+    std::fs::write(&private_file, contents)?;
+    let patch = format!(
+        "*** Begin Patch\n*** Delete File: {}\n*** End Patch",
+        private_file.display()
+    );
+    let mock = mount_sse_once(
+        harness.server(),
+        sse(vec![
+            ev_apply_patch_custom_tool_call("private-patch", &patch),
+            ev_completed("patch"),
+        ]),
+    )
+    .await;
+    let completion = mount_sse_once(harness.server(), sse(vec![ev_completed("done")])).await;
+    start(&harness).await?;
+    // Reading the original file for a Delete preview must fail before an
+    // approval can expose its contents or authorize a sandbox bypass.
+    finish_turn(&harness, Completion::Turn).await;
+    assert_eq!(mock.requests().len(), 1);
+    assert!(
+        !completion
+            .single_request()
+            .body_json()
+            .to_string()
+            .contains("private patch test data")
+    );
+    assert_eq!(std::fs::read_to_string(&private_file)?, contents);
     Ok(())
 }
 

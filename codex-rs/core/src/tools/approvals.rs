@@ -747,7 +747,7 @@ impl Session {
                 let reason = if just_in_time && sandbox_permissions.requires_escalated_permissions()
                 {
                     Some(format!(
-                        "{} This action requests execution outside the sandbox. {}",
+                        "{} This approval does not override protected paths. {}",
                         just_in_time::REASON,
                         justification
                             .as_ref()
