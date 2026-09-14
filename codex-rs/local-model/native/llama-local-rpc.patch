@@ -1,0 +1,46 @@
+--- a/ggml/src/ggml-rpc/transport.cpp
++++ b/ggml/src/ggml-rpc/transport.cpp
+@@ -1,4 +1,5 @@
+ #include "transport.h"
++#include "local_rpc_socket.h"
+ #include "ggml-impl.h"
+ 
+ #ifdef _WIN32
+@@ -629,6 +630,11 @@
+ }
+ 
+ static bool set_no_delay(sockfd_t sockfd) {
++#ifndef _WIN32
++    if (codex_local_rpc::is_unix_socket(sockfd)) {
++        return true;
++    }
++#endif
+     int flag = 1;
+     // set TCP_NODELAY to disable Nagle's algorithm
+     int ret = setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int));
+@@ -654,6 +660,12 @@
+ }
+ 
+ socket_ptr socket_t::create_server(const char * host, int port) {
++#ifndef _WIN32
++    if (host != nullptr && host[0] == '/') {
++        const int fd = codex_local_rpc::open_socket(host, codex_local_rpc::Mode::Listen);
++        return fd < 0 ? nullptr : socket_ptr(new socket_t(std::make_unique<impl>(fd)));
++    }
++#endif
+     auto sockfd = socket(AF_INET, SOCK_STREAM, 0);
+     if (!is_valid_fd(sockfd)) {
+         return nullptr;
+@@ -681,6 +693,12 @@
+ }
+ 
+ socket_ptr socket_t::connect(const char * host, int port) {
++#ifndef _WIN32
++    if (host != nullptr && host[0] == '/') {
++        const int fd = codex_local_rpc::open_socket(host, codex_local_rpc::Mode::Connect);
++        return fd < 0 ? nullptr : socket_ptr(new socket_t(std::make_unique<impl>(fd)));
++    }
++#endif
+     auto sockfd = socket(AF_INET, SOCK_STREAM, 0);
+     if (!is_valid_fd(sockfd)) {
+         return nullptr;

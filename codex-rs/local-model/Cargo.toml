@@ -1,0 +1,36 @@
+[package]
+name = "codex-local-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "codex_local_model"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true, features = ["http1", "tokio"] }
+base64 = { workspace = true }
+codex-app-server-protocol = { workspace = true }
+futures = { workspace = true }
+hmac = { workspace = true }
+libc = { workspace = true }
+rand = { workspace = true }
+rcgen = { workspace = true }
+reqwest = { workspace = true, features = ["stream"] }
+rustls = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["fs", "net", "process", "io-util", "sync", "time", "macros"] }
+tokio-rustls = { workspace = true }
+tokio-util = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }

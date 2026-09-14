@@ -1,0 +1,61 @@
+name: local-model
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'codex-rs/local-model/**'
+      - 'codex-rs/app-server/src/local_model.rs'
+      - 'codex-rs/app-server/src/local_model_tests.rs'
+      - 'codex-rs/app-server/src/message_processor.rs'
+      - 'codex-rs/app-server/tests/suite/v2/local_model.rs'
+      - 'codex-rs/app-server-protocol/**'
+      - 'codex-rs/Cargo.toml'
+      - 'codex-rs/Cargo.lock'
+      - '.github/workflows/local-model.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: cargo-nextest
+      - name: Linux app-server build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev
+      - name: Pure planning, artifact and authenticated transport tests
+        run: just test -p codex-local-model
+      - name: Private native RPC sockets
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror local-model/native/local_rpc_socket_tests.cpp -o "$RUNNER_TEMP/local-rpc-socket-tests"
+          "$RUNNER_TEMP/local-rpc-socket-tests"
+      - name: Public app-server lifecycle
+        if: runner.os == 'Linux'
+        run: just test -p codex-app-server --test all -E 'test(local_model_)'
+      - name: Connection ownership and disconnect
+        if: runner.os == 'Linux'
+        run: just test -p codex-app-server --lib -E 'test(local_model_)'
+      - name: Protocol and schema compatibility
+        if: runner.os == 'Linux'
+        run: just test -p codex-app-server-protocol

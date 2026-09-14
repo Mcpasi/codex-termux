@@ -135,6 +135,7 @@ fn reject_removed_permission_profile(request: &JSONRPCRequest) -> Result<(), JSO
 }
 
 pub(crate) struct MessageProcessor {
+    local_model_processor: crate::local_model::LocalModelProcessor,
     outgoing: Arc<OutgoingMessageSender>,
     models_refresh_worker: ModelsRefreshWorker,
     turn_cost_worker: Option<TurnCostWorker>,
@@ -168,6 +169,7 @@ pub(crate) struct MessageProcessor {
 #[derive(Debug)]
 pub(crate) struct ConnectionSessionState {
     pub(crate) rpc_gate: Arc<ConnectionRpcGate>,
+    local_model_cancel: tokio_util::sync::CancellationToken,
     pub(crate) mcp_event_streams: McpEventStreams,
     initialized: OnceLock<InitializedConnectionSessionState>,
 }
@@ -192,6 +194,7 @@ impl ConnectionSessionState {
     pub(crate) fn new() -> Self {
         Self {
             rpc_gate: Arc::new(ConnectionRpcGate::new()),
+            local_model_cancel: tokio_util::sync::CancellationToken::new(),
             mcp_event_streams: McpEventStreams::default(),
             initialized: OnceLock::new(),
         }
@@ -567,6 +570,13 @@ impl MessageProcessor {
         );
 
         Self {
+            local_model_processor: crate::local_model::LocalModelProcessor::new(
+                config
+                    .codex_home
+                    .parent()
+                    .unwrap_or_else(|| config.codex_home.clone())
+                    .to_path_buf(),
+            ),
             outgoing,
             models_refresh_worker,
             turn_cost_worker,
@@ -803,6 +813,10 @@ impl MessageProcessor {
         session_state: &ConnectionSessionState,
     ) {
         session_state.rpc_gate.close().await;
+        session_state.local_model_cancel.cancel();
+        self.local_model_processor
+            .connection_closed(connection_id)
+            .await;
         session_state.mcp_event_streams.clear().await;
         if timeout(
             CONNECTION_RPC_DRAIN_TIMEOUT,
@@ -1438,6 +1452,14 @@ impl MessageProcessor {
             }
             ClientRequest::PluginUninstall { params, .. } => {
                 self.plugin_processor.plugin_uninstall(params).await
+            }
+            request @ (ClientRequest::LocalModelStart { .. }
+            | ClientRequest::LocalModelWorkerStart { .. }
+            | ClientRequest::LocalModelStatus { .. }
+            | ClientRequest::LocalModelStop { .. }) => {
+                self.local_model_processor
+                    .request(connection_id, &session.local_model_cancel, request)
+                    .await
             }
             ClientRequest::ModelList { params, .. } => {
                 self.catalog_processor.model_list(params).await

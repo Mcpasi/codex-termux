@@ -2061,6 +2061,7 @@ dependencies = [
  "codex-hooks",
  "codex-http-client",
  "codex-image-generation-extension",
+ "codex-local-model",
  "codex-login",
  "codex-mcp",
  "codex-mcp-extension",
@@ -3601,6 +3602,32 @@ dependencies = [
  "tracing",
  "which 8.0.0",
  "wiremock",
+]
+
+[[package]]
+name = "codex-local-model"
+version = "0.153.3-agentcodi.2"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64 0.22.1",
+ "codex-app-server-protocol",
+ "futures",
+ "hmac 0.12.1",
+ "libc",
+ "pretty_assertions",
+ "rand 0.9.3",
+ "rcgen",
+ "reqwest 0.12.28",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "zeroize",
 ]
 
 [[package]]

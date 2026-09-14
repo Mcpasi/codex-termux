@@ -117,6 +117,7 @@ mod fs_watch;
 mod fuzzy_file_search;
 mod image_url;
 pub mod in_process;
+mod local_model;
 mod mcp_refresh;
 mod message_processor;
 mod models;

@@ -312,6 +312,14 @@ metadata in `data._meta`. Other operation failures retain the existing
 internal-error response. Tool results with `isError: true` remain results,
 including their `_meta`.
 
+### Local models and paired device pools (experimental)
+
+The app-server includes a separate `codex-local-model` module with `localModel/start`, `localModel/workerStart`, `localModel/status` and `localModel/stop`. These methods require `experimentalApi: true` on the existing initialized connection. They manage installed, SHA-256-verified llama.cpp artifacts and GGUF models, with one coordinator and at most nine explicitly paired CPU helpers.
+
+The coordinator returns transient provider connection information for an ordinary `thread/start` custom provider. Layer placement is reconsidered between inference requests; active inference is never migrated or silently replayed. A helper invitation contains a pinned TLS certificate and a pairing secret and must not enter logs, persisted client state or model context. Disconnecting the owning app-server connection stops its model role.
+
+This adds no changes to Android sandbox enforcement, tool permission profiles, V8/JIT or the code-mode host. AGENTCODI can consume the same JSONL methods after its native UI and pinned APK dependencies are integrated. The additional C++ build recipe produces inference dependencies separately from the existing Codex build. See the [local model module](../local-model/README.md) for payloads, installation provenance, bounds, current limitations and the verification handoff. Actual Android inference and pooled performance are not yet verified.
+
 ### Plugin configuration scope
 
 Plugin activation and MCP settings use the existing merged configuration, including

@@ -1040,6 +1040,30 @@ client_request_definitions! {
         response: v2::ReviewStartResponse,
     },
 
+    #[experimental("localModel/start")]
+    LocalModelStart => "localModel/start" {
+        params: v2::LocalModelStartParams,
+        serialization: None,
+        response: v2::LocalModelStartResponse,
+    },
+    #[experimental("localModel/workerStart")]
+    LocalModelWorkerStart => "localModel/workerStart" {
+        params: v2::LocalModelWorkerStartParams,
+        serialization: None,
+        response: v2::LocalModelWorkerStartResponse,
+    },
+    #[experimental("localModel/status")]
+    LocalModelStatus => "localModel/status" {
+        params: v2::LocalModelStatusParams,
+        serialization: None,
+        response: v2::LocalModelStatusResponse,
+    },
+    #[experimental("localModel/stop")]
+    LocalModelStop => "localModel/stop" {
+        params: v2::LocalModelStopParams,
+        serialization: None,
+        response: v2::LocalModelStopResponse,
+    },
     ModelList => "model/list" {
         params: v2::ModelListParams,
         serialization: None,
